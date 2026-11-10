@@ -146,9 +146,16 @@ export function inboxSlackNotifier(db: Db, deps: InboxSlackNotifierDeps) {
     // 1) New pending items → one message each.
     const ordered = [...pendingByKey].sort(([, a], [, b]) => Date.parse(a.activityAt) - Date.parse(b.activityAt));
     for (const [key, item] of ordered) {
-      if (byKey.has(key) || budget.left <= 0) continue;
+      const existing = byKey.get(key);
+      // Rows marked "baseline" by the earlier summary-only version were never sent on their own.
+      const legacyBaseline = existing?.status === "baseline";
+      if ((existing && !legacyBaseline) || budget.left <= 0) continue;
       const view = inboxNotifyView(item);
-      const row = await claim(key, { title: view.title, ask: view.ask });
+      let row = existing ?? null;
+      if (legacyBaseline) {
+        [row] = await db.update(chatActions).set({ status: "processing", payload: { title: view.title, ask: view.ask }, result: null, updatedAt: new Date() })
+          .where(and(eq(chatActions.id, existing.id), eq(chatActions.status, "baseline"))).returning();
+      } else row = await claim(key, { title: view.title, ask: view.ask });
       if (!row) continue;
       budget.left -= 1;
       try {
