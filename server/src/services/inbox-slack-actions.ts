@@ -3,7 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { chatActions, chatEndpoints, chatExternalPrincipals, chatIdentityLinks, type Db } from "@paperclipai/db";
 import type { AskUserQuestionsInteraction, IssueThreadInteraction } from "@paperclipai/shared";
 import {
-  INBOX_ACTION_PREFIX, INBOX_LINK_ACTION_PREFIX, formatInboxResolved, postSlackEphemeral, type InboxButton, type SlackBlockActionsPayload, type SlackInboxTransport,
+  INBOX_ACTION_PREFIX, INBOX_LINK_ACTION_PREFIX, formatInboxResolved, formatInboxStillPending, postSlackEphemeral, type InboxButton, type SlackBlockActionsPayload, type SlackInboxTransport,
 } from "./chat-channels/slack/inbox-notify.js";
 import type { InboxItemSource } from "./inbox-slack-notifier.js";
 import { nativeChatConfirmation, nativeChatCustomQuestion, nativeChatQuestion } from "./chat-interaction-publications.js";
@@ -80,8 +80,11 @@ export async function buildInboxActionSpecs(item: InboxItemSource, api: InboxAct
         ...(option.style === "destructive" ? { confirm: { title: option.label, text: "Hành động này không hoàn tác được.", confirm: "Xác nhận", deny: "Huỷ" } } : {}),
       }));
     }
-    case "blocker_attention":
     case "recovery_action":
+      // Closing or cancelling the source task does not close the recovery action (it needs an
+      // operator attestation in the Inbox), so offering those buttons would be misleading.
+      return [];
+    case "blocker_attention":
     case "review": {
       if (!issueId) return [];
       return [
@@ -215,6 +218,18 @@ export async function handleInboxClick(db: Db, deps: InboxClickDeps, endpoint: t
   }
   await db.update(chatActions).set({ status: "processed", result: { status: result.status }, updatedAt: new Date() }).where(eq(chatActions.id, claim.id));
   await db.update(chatActions).set({ status: "processed", updatedAt: new Date() }).where(eq(chatActions.id, row.id));
+  // The request succeeded, but only claim "resolved" if the item really left the Inbox.
+  let remains = false;
+  try { remains = (await deps.listPending(endpoint.companyId, payload.userId)).some(item => item.dedupKey === payload.dedupKey); }
+  catch { /* unknown: fall through as resolved, the sweep corrects it */ }
+  if (remains) {
+    if (token && groupResult?.channel && groupResult.ts) {
+      try { await deps.transport.update({ token, channel: groupResult.channel, ts: groupResult.ts, ...formatInboxStillPending(payload.title, payload.choice) }); }
+      catch (error) { deps.log?.warn({ endpointId: endpoint.id, error: String(error) }, "Inbox Slack message could not be updated after a click"); }
+    }
+    await tell("Đã thực hiện, nhưng việc này vẫn đang chờ trong Inbox. Hãy mở Inbox để hoàn tất.");
+    return true;
+  }
   await settle(payload.choice, "resolved");
   return true;
 }

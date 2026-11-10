@@ -198,10 +198,11 @@ describeDatabase("inbox Slack notifier", () => {
     const api = (interactions: any[]): InboxActionApi => ({
       interactions: async () => interactions as never,
       decision: async () => null,
-      request: async request => { requests.push(request); return apiOk ? { ok: true, status: 200 } : { ok: false, status: 409, message: "conflict" }; },
+      request: async request => { requests.push(request); if (apiOk && clearOnSuccess) pending = []; return apiOk ? { ok: true, status: 200 } : { ok: false, status: 409, message: "conflict" }; },
     });
     const buttonsOf = (post: { blocks: any[] }) => post.blocks.filter(block => block.type === "actions").flatMap(block => block.elements);
     const clickFor = (actionId: string, slackUserId = "U777") => ({ userId: slackUserId, teamId: "T1", channelId: "D123", messageTs: "ts-1", responseUrl: null, actions: [{ actionId, value: actionId }] });
+    let clearOnSuccess = true;
     const clickDeps = (override: Partial<Parameters<typeof handleInboxClick>[1]> = {}) => ({
       transport, token: async () => "xoxb-fake", api: api([question("qa")]), listPending: async () => pending, ...override,
     });
@@ -220,6 +221,16 @@ describeDatabase("inbox Slack notifier", () => {
       expect(buttons.filter((button: any) => button.action_id.startsWith("inbox:link:")).every((button: any) => button.url)).toBe(true);
       const stored = await db.select().from(chatActions).where(eq(chatActions.kind, "inbox_action"));
       expect(stored).toHaveLength(2);
+    });
+
+    it("does not claim success when the item is still pending after the action", async () => {
+      clearOnSuccess = false;
+      try {
+        const buttons = await setup();
+        await handleInboxClick(db, clickDeps(), await endpointRow(), clickFor(buttons[0].action_id));
+        expect(updates.at(-1)!.text).toContain("vẫn đang chờ");
+        expect(updates.at(-1)!.text).not.toContain("✅");
+      } finally { clearOnSuccess = true; }
     });
 
     it("click resolves through the web API route, updates the message, and blocks a second click", async () => {

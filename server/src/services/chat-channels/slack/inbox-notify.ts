@@ -92,6 +92,11 @@ export function formatInboxResolved(title: string, choice?: string | null) {
   return { text, blocks: [section(`✅ ~${escapeMrkdwn(clip(title, 200))}~ — đã xử lý${choice ? `: *${escapeMrkdwn(clip(choice, 100))}*` : ""}`)] };
 }
 
+export function formatInboxStillPending(title: string, choice?: string | null) {
+  const text = `⚠️ Đã thực hiện${choice ? ` "${clip(choice, 100)}"` : ""} nhưng việc vẫn đang chờ: ${clip(title, 200)}. Mở Inbox để hoàn tất.`;
+  return { text, blocks: [section(`⚠️ ${escapeMrkdwn(clip(title, 200))} — đã thực hiện${choice ? ` _${escapeMrkdwn(clip(choice, 100))}_` : ""}, nhưng *việc vẫn đang chờ trong Inbox*. Hãy mở Inbox để hoàn tất.`)] };
+}
+
 export function formatInboxReminder(view: InboxNotifyView, now: number, inboxUrl: string | null) {
   const text = `Nhắc lại: vẫn đang chờ bạn (${waitingLabel(view.since, now)}) — ${clip(view.title, 200)}`;
   return { text, blocks: [section(`⏰ Vẫn đang chờ bạn ${waitingLabel(view.since, now)}. ${inboxLink(inboxUrl) ?? ""}`.trim())] };
