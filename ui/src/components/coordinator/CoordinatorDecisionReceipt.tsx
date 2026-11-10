@@ -1,5 +1,6 @@
 import { ArrowUpRight, Check } from "lucide-react";
 import type { DecisionHistoryItem } from "@paperclipai/shared";
+import { timeAgo } from "../../lib/timeAgo";
 
 /** A recorded decision links to its context; it is not a second approval form. */
 export function CoordinatorDecisionReceipt({ item, onOpen }: { item: DecisionHistoryItem; onOpen: (href: string) => void }) {
@@ -9,6 +10,7 @@ export function CoordinatorDecisionReceipt({ item, onOpen }: { item: DecisionHis
       <span className="block text-sm font-medium">{item.label}</span>
       <span className="block truncate text-sm text-muted-foreground">{item.issueIdentifier} · {item.issueTitle}</span>
     </span>
+    {item.resolvedAt ? <time dateTime={item.resolvedAt} className="shrink-0 text-xs text-muted-foreground">{timeAgo(item.resolvedAt)}</time> : null}
     <ArrowUpRight className="size-4 shrink-0 text-muted-foreground" aria-hidden />
   </button>;
 }

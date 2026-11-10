@@ -1425,8 +1425,24 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         loadImages(db, companyId, recoveryRows.map((row) => row.sourceIssueId), readCondition),
       ]);
 
+      // Surface why the recovery exists (e.g. a failed setup run) so the Inbox card
+      // tells the operator what broke instead of only repeating the next action.
+      const recoveryRunIds = recoveryRows
+        .map((row) => (row.evidence as { latestRunId?: unknown } | null)?.latestRunId)
+        .filter((id): id is string => typeof id === "string");
+      const recoveryRunErrors = new Map<string, string | null>();
+      if (recoveryRunIds.length > 0) {
+        const runRows = await db
+          .select({ id: heartbeatRuns.id, error: heartbeatRuns.error, errorCode: heartbeatRuns.errorCode })
+          .from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.id, recoveryRunIds)));
+        for (const run of runRows) recoveryRunErrors.set(run.id, excerpt(run.error ?? run.errorCode));
+      }
+
       for (const recovery of recoveryRows) {
         const sourceIssue = recoveryIssueMap.get(recovery.sourceIssueId) ?? null;
+        const failedRunId = (recovery.evidence as { latestRunId?: unknown } | null)?.latestRunId;
+        const failedRunReason = typeof failedRunId === "string" ? recoveryRunErrors.get(failedRunId) ?? null : null;
         if (!sourceIssue) continue;
         const recoveryIssue = recovery.recoveryIssueId ? recoveryIssueMap.get(recovery.recoveryIssueId) ?? null : null;
         const dedupKey = `recovery:${recovery.kind}:${recovery.sourceIssueId}:${recovery.cause}:${recovery.fingerprint}`;
@@ -1468,7 +1484,9 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
           updatedAt: toIso(recovery.updatedAt),
           relatedIssue: sourceIssue ? issueSubject(prefix, sourceIssue) : null,
           ...issueContext(sourceIssue),
-          detail: genericDetail(recovery.nextAction, issueImages(recoveryImageMap, recovery.sourceIssueId)),
+          detail: failedRunReason
+            ? { kind: "failed_run", agentName: null, failureReasonExcerpt: failedRunReason, images: issueImages(recoveryImageMap, recovery.sourceIssueId) }
+            : genericDetail(recovery.nextAction, issueImages(recoveryImageMap, recovery.sourceIssueId)),
         }));
       }
 
