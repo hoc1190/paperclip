@@ -28,6 +28,7 @@ import { NativeSelect } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { parseCssTimeMs } from "@/components/task-chat/motion-tokens";
 import { readIssueReviewPolicyMetadata } from "@/lib/review-policy";
+import { timeAgo } from "../../lib/timeAgo";
 import { CoordinatorDecisionReceipt as Receipt } from "./CoordinatorDecisionReceipt";
 import { CoordinatorTaskMotion } from "./CoordinatorTaskCommitment";
 
@@ -76,6 +77,14 @@ function HistoryPanel({ companyId, agents, onClose, mobile = false }: { companyI
     <div className="space-y-4">{[...groups].map(([label, entries]) => <section key={label} className="space-y-3">{label ? <h3 className="text-sm font-medium text-muted-foreground">{label}</h3> : null}{entries.map((item) => <div key={item.id} className="space-y-1"><Receipt item={item} onOpen={navigate} /><p className="px-1 text-xs text-muted-foreground"><time dateTime={item.resolvedAt}>{new Date(item.resolvedAt).toLocaleString()}</time></p></div>)}</section>)}</div>
     {history.hasNextPage ? <Button variant="outline" disabled={history.isFetchingNextPage} onClick={() => void history.fetchNextPage()}>{history.isFetchingNextPage ? "Loading…" : "Load more decisions"}</Button> : null}
   </div>;
+}
+
+/** Plain-language "what do I have to do" label so each card states its ask up front. */
+function askLabel(kind: "interaction" | "decision" | "stalled" | "review") {
+  return kind === "interaction" ? "Needs your answer" : kind === "decision" ? "Needs your decision" : kind === "stalled" ? "Stuck in review — pick how to continue" : "Needs your review";
+}
+function AskBanner({ kind, from, since }: { kind: "interaction" | "decision" | "stalled" | "review"; from?: string | null; since: string }) {
+  return <p className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground"><span className="rounded-full bg-primary/10 px-2 py-0.5 font-medium text-foreground">{askLabel(kind)}</span>{from ? <span>from {from}</span> : null}<span>· waiting {timeAgo(since)}</span></p>;
 }
 
 export function CoordinatorNeedsYou() {
@@ -206,6 +215,7 @@ export function CoordinatorNeedsYou() {
       </SheetContent>
     </Sheet> : null}
     <header className="flex items-center justify-between gap-3"><h1 className="text-2xl font-medium">Inbox</h1><Button variant="ghost" onClick={showHistory}><History className="size-4" />Decision history</Button></header>
+    {pendingItems.length ? <p role="status" className="text-sm">You have <strong>{pendingItems.length}</strong> item{pendingItems.length === 1 ? "" : "s"} waiting on you. Answer them in order below — agents are blocked until you do.</p> : null}
     <div data-canonical-toolbar="coordinator-decisions" role="toolbar" aria-label="Decisions controls" className="flex flex-wrap items-center gap-2">
       <ToolbarSearch query={query} onQueryChange={setQuery} label="Search decisions" placeholder="Search decisions or task IDs…" />
       <NativeSelect aria-label="Filter decisions by agent" value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)} className="w-auto"><option value="">All agents</option>{(agentQuery.data ?? []).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</NativeSelect>
@@ -230,6 +240,7 @@ export function CoordinatorNeedsYou() {
       <CoordinatorTaskMotion eventId={`decision:${selectedCompanyId}:${userId}:${id}`} phase={phase} createdAt={item.activityAt} className="coordinator-decision-motion"
         onSettled={() => setSettling(current => current.filter(entry => `${entry.sourceKind}:${entry.subject.id}` !== id))}>
       {receipt ? <Receipt item={receipt} onOpen={navigate} /> : <article className="coordinator-decision-card space-y-4 rounded-xl border border-border bg-card p-6">
+        <AskBanner kind={interaction ? "interaction" : decision ? "decision" : stalledReview ? "stalled" : "review"} from={item.originAgentName} since={item.activityAt} />
         {interaction ? <AttentionInteractionResolver footerSlot={taskLink} presentation="coordinator-decision" companyId={selectedCompanyId} issueId={issueId} interactionId={item.subject.id} agentMap={agentMap} currentUserId={userId} onResolved={resolved => {
           if (!resolved || resolved.status === "pending") { void feed.refetch(); void recent.refetch(); return; }
           onResolved(item);
