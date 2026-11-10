@@ -7,6 +7,25 @@ const run = { id: "run", agentId: "agent", status: "failed", scheduledRetryAt: n
   resultJson: { projectAccessDenied: { projectId: "22222222-2222-4222-8222-222222222222" } } };
 const agent = { status: "idle", pauseReason: null };
 
+describe("saved governed wait shutdown", () => {
+  const now = Date.parse("2026-11-09T12:00:00Z");
+  const pending = { ...run, runtimeMode: "native", errorCode: "native_governed_wait_settlement_pending", resultJson: null };
+  it("names automatic shutdown settlement without offering a duplicate Retry", () => {
+    expect(projectTaskInterruption(issue, { run: { ...pending, nativeResumeAt: new Date(now + 30_000) }, agent,
+      paused: false, approval: false }, now)).toMatchObject({ state: "working", canRetry: false,
+        retryWait: { reason: "governed_wait_settlement", message: "Your work is saved. Paperclip is finishing shutdown." } });
+  });
+  it("explains exhausted shutdown recovery while preserving the saved work", () => {
+    expect(projectTaskInterruption(issue, { run: pending, agent, paused: false, approval: false }, now))
+      .toMatchObject({ state: "failed", canRetry: false, retryWait: { reason: "governed_wait_settlement",
+        message: "Paperclip couldn’t confirm shutdown. Your work is saved; continuation is paused." } });
+  });
+  it("keeps genuine approvals authoritative", () => {
+    expect(projectTaskInterruption(issue, { run: pending, agent, paused: false, approval: true }, now))
+      .toMatchObject({ state: "waiting_for_user", userAction: "approval" });
+  });
+});
+
 describe("queued dependency wait presentation", () => {
   const waitingRun = { ...run, status: "cancelled", runtimeMode: "legacy" as const, startedAt: null,
     errorCode: "issue_dependencies_blocked", resultJson: {
@@ -48,6 +67,36 @@ describe("queued dependency wait presentation", () => {
   });
 });
 
+describe("never-started task refused by admission", () => {
+  const todo = { ...issue, status: "todo" };
+  const admissionWait = { id: "wake", status: "skipped", reason: "budget.blocked", agentId: "agent" };
+  it("names an accounting hold as an automatic wait without a Retry", () => {
+    expect(projectTaskInterruption(todo, { agent, admissionWait, paused: false, approval: false })).toMatchObject({
+      responsibility: "system", state: "working", canRetry: false,
+      retryWait: { reason: "budget.blocked", message: expect.stringContaining("starts automatically") } });
+  });
+  it("keeps pauses and budget stops as user actions instead of promising an automatic start", () => {
+    for (const [state, action] of [
+      [{ project: { pausedAt: new Date(), pauseReason: null } }, "resume"],
+      [{ company: { status: "paused", pauseReason: "manual" } }, "resume"],
+      [{ paused: true }, "resume"],
+      [{ agent: { status: "paused", pauseReason: "manual" } }, "resume"],
+      [{ company: { status: "paused", pauseReason: "budget" } }, "budget"],
+      [{ approval: true }, "approval"],
+    ] as const) {
+      expect(projectTaskInterruption(todo, { agent, admissionWait, paused: false, approval: false, ...state }))
+        .toMatchObject({ responsibility: "user", state: "waiting_for_user", userAction: action });
+    }
+  });
+  it("shows nothing for other refusals, started tasks or another assignee", () => {
+    for (const changed of [{ reason: "agent.not_invokable" }, { status: "queued" }, { agentId: "other" }]) {
+      expect(projectTaskInterruption(todo, { agent, admissionWait: { ...admissionWait, ...changed }, paused: false, approval: false }))
+        .toBeNull();
+    }
+    expect(projectTaskInterruption({ ...todo, status: "cancelled" }, { agent, admissionWait, paused: false, approval: false })).toBeNull();
+  });
+});
+
 describe("unadmitted chat Retry presentation", () => {
   const now = Date.parse("2026-01-01T12:00:00Z");
   const failed = { ...run, errorCode: "native_provider_terminal_failed", resultJson: null };
@@ -80,6 +129,24 @@ describe("unadmitted chat Retry presentation", () => {
   });
 });
 
+// The native coordinator resumes the same run itself after an attach failure.
+// A manual Retry offered meanwhile would race that automatic resume.
+it("shows a pending native same-run resume instead of a competing Retry", () => {
+  const now = Date.parse("2026-11-06T15:25:50.000Z");
+  const failed = { ...run, runtimeMode: "native" as const, errorCode: "native_session_interrupted", resultJson: null };
+  const resumeAt = new Date("2026-11-06T15:26:18.687Z");
+  expect(projectTaskInterruption(issue, { run: { ...failed, nativeResumeAt: resumeAt }, agent, paused: false, approval: false }, now))
+    .toMatchObject({ state: "retry_scheduled", canRetry: false, nextRetryAt: resumeAt.toISOString() });
+  // A due resume is being dispatched; it is still not the user's turn.
+  expect(projectTaskInterruption(issue, { run: { ...failed, nativeResumeAt: new Date(now - 30_000) }, agent, paused: false, approval: false }, now))
+    .toMatchObject({ state: "working", canRetry: false });
+  // A resume that never ran, or no resume at all, leaves exactly one Retry.
+  expect(projectTaskInterruption(issue, { run: { ...failed, nativeResumeAt: new Date(now - 10 * 60_000) }, agent, paused: false, approval: false }, now))
+    .toMatchObject({ state: "failed", canRetry: true });
+  expect(projectTaskInterruption(issue, { run: failed, agent, paused: false, approval: false }, now))
+    .toMatchObject({ state: "failed", canRetry: true });
+});
+
 it("explains a persisted Retry wait without exposing the saved payload", () => {
   const failed = { ...run, errorCode: "native_provider_terminal_failed", resultJson: null };
   const wait = { id: "retry", requestedAt: new Date(), sourceRunId: failed.id,
@@ -93,6 +160,14 @@ it("explains a persisted Retry wait without exposing the saved payload", () => {
     .toMatchObject({ retryWait: { reason: "execution_recovery", message: "Retry is waiting for execution checks. Your message is saved." } });
   expect(projectTaskInterruption(issue, { run: failed, agent, wait, paused: true, approval: false }))
     .toMatchObject({ state: "waiting_for_user", userAction: "resume" });
+});
+
+it("names a budget gate instead of generic execution checks for a refused Retry", () => {
+  const failed = { ...run, errorCode: "native_provider_terminal_failed", resultJson: null };
+  expect(projectTaskInterruption(issue, { run: failed, agent, paused: false, approval: false,
+    wait: { id: "retry", requestedAt: new Date(), sourceRunId: failed.id, executionWaitReason: "budget.blocked" } }))
+    .toMatchObject({ state: "failed", canRetry: true, retryWait: { reason: "budget.blocked",
+      message: "Retry is waiting for the budget to allow new work. Check Costs for unrecorded or unpriced usage." } });
 });
 
 it.each(["cleanup_quarantined", "cancelled_by_operator", "retry_source_changed"])("does not offer Retry for terminal Retry waits: %s", reason => {
@@ -118,6 +193,65 @@ it("preserves the actual workspace preparation error without changing retry auth
     { run: failedRun, agent, paused: false, approval: false })).not.toHaveProperty("workspaceFailure");
   expect(projectTaskInterruption(issue, { run: { ...failedRun, errorCode: "unrelated_failure" }, agent, paused: false, approval: false }))
     .not.toHaveProperty("workspaceFailure");
+});
+
+describe("setup command failure presentation (CF1)", () => {
+  const setupError = "Execution workspace provision command \"bash ./scripts/provision-worktree.sh\" failed: bash: ./scripts/provision-worktree.sh: No such file or directory";
+  const setupRun = { ...run, errorCode: "setup_failed", error: setupError, resultJson: { setupCommandFailure: {
+    step: "workspace_provision", command: "bash ./scripts/provision-worktree.sh", exitCode: 127,
+    output: "bash: ./scripts/provision-worktree.sh: No such file or directory" } } };
+
+  it("names the broken setup command on the task without changing retry authority", () => {
+    const withCause = projectTaskInterruption(issue, { run: setupRun, agent, paused: false, approval: false });
+    const withoutCause = projectTaskInterruption(issue, { run: { ...setupRun, error: "x", resultJson: null }, agent, paused: false, approval: false });
+    expect(withCause).toMatchObject({ state: "failed", canRetry: true, userAction: null, setupFailure: {
+      step: "workspace_provision", command: "bash ./scripts/provision-worktree.sh", exitCode: 127,
+      message: "The project's workspace provision command \"bash ./scripts/provision-worktree.sh\" failed with exit code 127: bash: ./scripts/provision-worktree.sh: No such file or directory" } });
+    const { setupFailure: _named, ...rest } = withCause!;
+    expect(rest).toEqual(withoutCause);
+    expect(withCause).not.toHaveProperty("workspaceFailure");
+  });
+
+  it("recognizes a setup failure recorded before the structured cause existed", () => {
+    expect(projectTaskInterruption(issue, { run: { ...setupRun, resultJson: null }, agent, paused: false, approval: false }))
+      .toMatchObject({ state: "failed", setupFailure: { step: "workspace_provision", command: "bash ./scripts/provision-worktree.sh",
+        exitCode: null, output: "bash: ./scripts/provision-worktree.sh: No such file or directory" } });
+  });
+
+  it("keeps a transient setup retry scheduled and only adds the name", () => {
+    const retrying = { ...setupRun, status: "scheduled_retry", scheduledRetryAt: new Date(Date.now() + 60_000), scheduledRetryReason: "transient_failure" };
+    const named = projectTaskInterruption(issue, { run: retrying, agent, paused: false, approval: false });
+    const unnamed = projectTaskInterruption(issue, { run: { ...retrying, error: "x", resultJson: null }, agent, paused: false, approval: false });
+    expect(named?.setupFailure?.command).toBe("bash ./scripts/provision-worktree.sh");
+    const { setupFailure: _named, ...rest } = named!;
+    expect(rest).toEqual(unnamed);
+  });
+
+  it("bounds the output tail and strips credentials from the command", () => {
+    const noisy = { ...setupRun, resultJson: { setupCommandFailure: { step: "workspace_provision",
+      command: "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789 ./setup.sh --password hunter22", exitCode: 1,
+      output: `${"x".repeat(5_000)}\nfinal line` } } };
+    const failure = projectTaskInterruption(issue, { run: noisy, agent, paused: false, approval: false })?.setupFailure;
+    expect(failure?.command).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+    expect(failure?.command).not.toContain("hunter22");
+    expect(failure?.output?.length).toBeLessThanOrEqual(300);
+    expect(failure?.output).toMatch(/final line$/);
+  });
+
+  it("recognizes older quoted and multiline commands", () => {
+    for (const command of ['bash "./scripts/provision-worktree.sh"', "set -e\n./setup.sh"]) {
+      expect(projectTaskInterruption(issue, { run: { ...setupRun, resultJson: null,
+        error: `Execution workspace provision command "${command}" failed with exit code 2` }, agent, paused: false, approval: false })?.setupFailure)
+        .toMatchObject({ command, exitCode: 2 });
+    }
+  });
+
+  it("does not name setup for other failures or settled tasks", () => {
+    expect(projectTaskInterruption(issue, { run: { ...setupRun, errorCode: "adapter_failed" }, agent, paused: false, approval: false }))
+      .not.toHaveProperty("setupFailure");
+    expect(projectTaskInterruption({ ...issue, status: "done" }, { run: setupRun, agent, paused: false, approval: false }))
+      .not.toHaveProperty("setupFailure");
+  });
 });
 
 function operatorStoppedRun() {
@@ -285,5 +419,38 @@ describe("scheduled resource wait presentation", () => {
     expect(projectTaskInterruption(issue, { run: waiting, agent, paused: false, approval: false,
       retryWait: { id: "retry", sourceRunId: run.id, requestedAt: new Date(now), preparationStatus: "failed" } }, now))
       .toMatchObject({ state: "failed", canRetry: true });
+  });
+});
+
+describe("saved Retry held by dependencies", () => {
+  const failedRun = { ...run, status: "failed", errorCode: "native_session_interrupted", resultJson: {} };
+  const retryWait = { id: "retry", requestedAt: new Date(0), sourceRunId: "run" };
+  const project = (retryDependencies: { count: number; blocked: boolean; cancelled: boolean; savingFilesOnly: boolean }) =>
+    projectTaskInterruption(issue, { run: failedRun, agent, retryWait, paused: false, approval: false, retryDependencies });
+
+  it.each([
+    [{ count: 1, blocked: true, cancelled: false, savingFilesOnly: false }, "Retry or unblock it"],
+    [{ count: 1, blocked: false, cancelled: true, savingFilesOnly: false }, "Remove or replace that dependency"],
+    [{ count: 1, blocked: false, cancelled: false, savingFilesOnly: true }, "to save its files"],
+    [{ count: 2, blocked: false, cancelled: false, savingFilesOnly: false }, "to finish"],
+  ])("names what the saved Retry waits on (%o)", (dependencies, text) => {
+    const presentation = project(dependencies);
+    expect(presentation).toMatchObject({ state: "working", canRetry: false, intentId: "retry",
+      retryWait: { reason: "dependency_blocked" } });
+    expect(presentation?.retryWait?.message).toContain(text);
+  });
+});
+
+describe("setup command failure evidence", () => {
+  it("removes a registered secret that crosses the output cut before shortening", async () => {
+    const { setupCommandFailureResultJson } = await import("./workspace-setup-command-failure.js");
+    const secret = "registered-private-value-0123456789";
+    const failure = Object.assign(new Error("setup failed"), { step: "workspace_provision", command: "./setup.sh", exitCode: 1,
+      // The cut keeps the last 299 characters; it lands inside the secret.
+      output: `${secret}${"y".repeat(299 - 10)}` });
+    const recorded = setupCommandFailureResultJson(failure, [secret]);
+    expect(recorded).toMatchObject({ setupCommandFailure: { step: "workspace_provision", exitCode: 1 } });
+    const text = JSON.stringify(recorded);
+    for (let index = 0; index + 8 <= secret.length; index += 1) expect(text).not.toContain(secret.slice(index, index + 8));
   });
 });
