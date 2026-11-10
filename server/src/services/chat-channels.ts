@@ -3526,6 +3526,14 @@ return {
     authorizeFastResponse,
     slackRegistration,
     sendSlackTestMessage,
+    /** Credentials and origin the Inbox→Slack notifier needs; no second token path. */
+    slackInboxAccess: {
+      botToken: async (endpointId: string) => {
+        const record = await endpointRecord(endpointId);
+        return record ? (await resolveCredentials(record.endpoint)).botToken ?? null : null;
+      },
+      publicBaseUrl: () => getPublicBaseUrl() ?? null,
+    },
     saveGitHubSetupProgress,
     githubWizard,
     startGitHubRegistration: githubRegistration.start,

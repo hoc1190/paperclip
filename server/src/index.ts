@@ -120,6 +120,8 @@ import { drainHttpRequestWork } from "./middleware/idle-admission.js";
 import { initializeCloudRuntimeConfig } from "./services/cloud-runtime-config.js";
 import { loadCloudBootstrapConfig, loadConfig, type Config } from "./config.js";
 import { logger } from "./middleware/logger.js";
+import { inboxSlackNotifier } from "./services/inbox-slack-notifier.js";
+import { createSlackInboxTransport } from "./services/chat-channels/slack/inbox-notify.js";
 import { setStartupRecoveryPhase } from "./startup-recovery-state.js";
 import {
   StartupRefusalError,
@@ -150,6 +152,7 @@ import {
   githubConnectionEventService,
   issueService,
   instanceSettingsService,
+  attentionService,
   reconcileBuiltInAgentsOnStartup,
   reconcileCodexLocalManagedHomesOnStartup,
   reconcilePersistedRuntimeServicesOnStartup,
@@ -1355,6 +1358,23 @@ async function startServerWithDatabaseTeardown(
   });
   const accountingWorker = registerCostAccountingWork(db, deliveryWork, accountingHeartbeat.reconcileCostAccounting);
   server.on("close", accountingWorker.stop);
+  if (process.env.PAPERCLIP_INBOX_SLACK_NOTIFY !== "false" && !isWarmStandby()) {
+    // Mirrors pending board Inbox items to Slack (see services/inbox-slack-notifier.ts).
+    const chatChannels = app.locals.chatChannels as ReturnType<typeof import("./services/chat-channels.js").chatChannelService>;
+    const inboxAttention = attentionService(db);
+    const reminderMinutes = Number(process.env.PAPERCLIP_INBOX_SLACK_REMINDER_MINUTES ?? "240");
+    const inboxSlack = inboxSlackNotifier(db, {
+      transport: createSlackInboxTransport(),
+      token: chatChannels.slackInboxAccess.botToken,
+      baseUrl: chatChannels.slackInboxAccess.publicBaseUrl,
+      connectorsEnabled: async () => (await instanceSettingsService(db).getExperimental()).enableChatConnectors === true,
+      channelOverride: () => process.env.PAPERCLIP_INBOX_SLACK_CHANNEL,
+      reminderMs: Number.isFinite(reminderMinutes) ? Math.max(0, reminderMinutes) * 60_000 : undefined,
+      listPending: async (companyId, userId) => (await inboxAttention.list(companyId, { userId, all: true, allowUnscopedAll: true })).items,
+      log: logger,
+    }).start();
+    server.on("close", inboxSlack.stop);
+  }
   skillSourceSync.start(deliveryWork);
   skillPackageWork(db).start(deliveryWork);
   const runtimeAssetCleanup = runtimeAssetRetention(db).start(deliveryWork);

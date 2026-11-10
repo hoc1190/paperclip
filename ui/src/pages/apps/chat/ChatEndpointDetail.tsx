@@ -1071,6 +1071,16 @@ function Activity({
           </div>
         </div>
       )}
+      {endpoint.provider === "slack" && endpoint.setup?.callbackSurfaces && endpoint.setup.callbackSurfaces.interactivity.status !== "current" && (
+        <div role="alert" className="flex items-start gap-2 rounded-lg border border-(--status-task-blocked)/40 p-3 text-sm">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-(--status-task-blocked)" />
+          <p>
+            <span className="font-medium">Buttons in Slack won&apos;t work yet.</span>{" "}
+            Slack has not called the Interactivity URL, so approving or answering from a Slack message will fail until it is verified.
+            Open “Connection health and controls” below and re-save the App Manifest, then press a button in Slack once.
+          </p>
+        </div>
+      )}
       <details className="group rounded-lg border border-border">
         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4 text-sm font-medium chat-connection-health-summary">
           <span>Connection health and controls</span>

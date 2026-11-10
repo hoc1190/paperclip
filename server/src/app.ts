@@ -581,6 +581,7 @@ export async function createApp(
   // Voice capabilities are verified by the signed callback route, not by
   // board/agent bearer authentication. Mount before actorMiddleware so its
   // per-session Bearer cannot be mistaken for an agent API key.
+  app.locals.chatChannels = chatChannels;
   app.use(voiceWebhookRoutes(db, chatChannels.voice));
   app.use(
     actorMiddleware(db, {
