@@ -122,6 +122,7 @@ import { loadCloudBootstrapConfig, loadConfig, type Config } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { inboxSlackNotifier } from "./services/inbox-slack-notifier.js";
 import { createSlackInboxTransport } from "./services/chat-channels/slack/inbox-notify.js";
+import { createLoopbackInboxApi, handleInboxClick } from "./services/inbox-slack-actions.js";
 import { setStartupRecoveryPhase } from "./startup-recovery-state.js";
 import {
   StartupRefusalError,
@@ -1363,14 +1364,24 @@ async function startServerWithDatabaseTeardown(
     const chatChannels = app.locals.chatChannels as ReturnType<typeof import("./services/chat-channels.js").chatChannelService>;
     const inboxAttention = attentionService(db);
     const reminderMinutes = Number(process.env.PAPERCLIP_INBOX_SLACK_REMINDER_MINUTES ?? "240");
+    // Buttons execute through the server's own API, which treats every local request as the board only in
+    // local_trusted mode; other modes keep link buttons until a scoped service credential exists.
+    const inboxApi = config.deploymentMode === "local_trusted" ? createLoopbackInboxApi(`http://127.0.0.1:${listenPort}`) : null;
+    const inboxTransport = createSlackInboxTransport();
+    const inboxListPending = async (companyId: string, userId: string) => (await inboxAttention.list(companyId, { userId, all: true, allowUnscopedAll: true })).items;
+    chatChannels.slackInboxAccess.setClickHandler(async (endpoint, click) => {
+      await handleInboxClick(db, { transport: inboxTransport, token: chatChannels.slackInboxAccess.botToken, api: inboxApi, listPending: inboxListPending, log: logger }, endpoint, click);
+    });
+    server.on("close", () => chatChannels.slackInboxAccess.setClickHandler(null));
     const inboxSlack = inboxSlackNotifier(db, {
-      transport: createSlackInboxTransport(),
+      transport: inboxTransport,
+      api: inboxApi,
       token: chatChannels.slackInboxAccess.botToken,
       baseUrl: chatChannels.slackInboxAccess.publicBaseUrl,
       connectorsEnabled: async () => (await instanceSettingsService(db).getExperimental()).enableChatConnectors === true,
       channelOverride: () => process.env.PAPERCLIP_INBOX_SLACK_CHANNEL,
       reminderMs: Number.isFinite(reminderMinutes) ? Math.max(0, reminderMinutes) * 60_000 : undefined,
-      listPending: async (companyId, userId) => (await inboxAttention.list(companyId, { userId, all: true, allowUnscopedAll: true })).items,
+      listPending: inboxListPending,
       log: logger,
     }).start();
     server.on("close", inboxSlack.stop);

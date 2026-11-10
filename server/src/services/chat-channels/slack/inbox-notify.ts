@@ -46,18 +46,50 @@ function describe(view: InboxNotifyView, now: number) {
   };
 }
 
-export function formatInboxNotification(view: InboxNotifyView, now: number, inboxUrl: string | null) {
+/** One clickable button. `url` makes a link button; otherwise the click is routed by `actionId`. */
+export type InboxButton = {
+  actionId: string;
+  text: string;
+  style?: "primary" | "danger";
+  url?: string;
+  /** Slack confirmation dialog, shown before a destructive click is sent. */
+  confirm?: { title: string; text: string; confirm: string; deny: string };
+};
+
+const SLACK_BUTTONS_PER_BLOCK = 5;
+
+function buttonElement(button: InboxButton) {
+  return {
+    type: "button", action_id: button.actionId, text: { type: "plain_text", text: clip(button.text, 70) },
+    ...(button.url ? { url: button.url } : { value: button.actionId }),
+    ...(button.style ? { style: button.style } : {}),
+    ...(button.confirm ? { confirm: {
+      title: { type: "plain_text", text: clip(button.confirm.title, 100) }, text: { type: "plain_text", text: clip(button.confirm.text, 300) },
+      confirm: { type: "plain_text", text: clip(button.confirm.confirm, 30) }, deny: { type: "plain_text", text: clip(button.confirm.deny, 30) },
+    } } : {}),
+  };
+}
+
+export function inboxActionBlocks(buttons: InboxButton[]): unknown[] {
+  const blocks: unknown[] = [];
+  for (let index = 0; index < buttons.length; index += SLACK_BUTTONS_PER_BLOCK)
+    blocks.push({ type: "actions", elements: buttons.slice(index, index + SLACK_BUTTONS_PER_BLOCK).map(buttonElement) });
+  return blocks;
+}
+
+export function formatInboxNotification(view: InboxNotifyView, now: number, inboxUrl: string | null, buttons: InboxButton[] = []) {
   const { plain, head, meta } = describe(view, now);
   const blocks: unknown[] = [section(head)];
   const detail = view.detail ? escapeMrkdwn(clip(view.detail, 400)) : null;
   if (detail) blocks.push(section(detail));
-  blocks.push(context([meta, inboxLink(inboxUrl)].filter(Boolean).join(" · ")));
+  blocks.push(context([meta, buttons.length ? null : inboxLink(inboxUrl)].filter(Boolean).join(" · ")));
+  blocks.push(...inboxActionBlocks(buttons));
   return { text: plain, blocks };
 }
 
-export function formatInboxResolved(title: string) {
-  const text = `✅ Đã xử lý: ${clip(title, 200)}`;
-  return { text, blocks: [section(`✅ ~${escapeMrkdwn(clip(title, 200))}~ — đã xử lý`)] };
+export function formatInboxResolved(title: string, choice?: string | null) {
+  const text = `✅ Đã xử lý: ${clip(title, 200)}${choice ? ` → ${clip(choice, 100)}` : ""}`;
+  return { text, blocks: [section(`✅ ~${escapeMrkdwn(clip(title, 200))}~ — đã xử lý${choice ? `: *${escapeMrkdwn(clip(choice, 100))}*` : ""}`)] };
 }
 
 export function formatInboxReminder(view: InboxNotifyView, now: number, inboxUrl: string | null) {
@@ -65,6 +97,12 @@ export function formatInboxReminder(view: InboxNotifyView, now: number, inboxUrl
   return { text, blocks: [section(`⏰ Vẫn đang chờ bạn ${waitingLabel(view.since, now)}. ${inboxLink(inboxUrl) ?? ""}`.trim())] };
 }
 
+export function formatInboxIntro(total: number) {
+  return { text: `Đã bật thông báo Inbox: ${total} việc đang chờ bạn, gửi từng tin riêng bên dưới.`,
+    blocks: [section(`*Đã bật thông báo Inbox.* ${total} việc đang chờ bạn — mỗi việc một tin riêng bên dưới, bấm nút để xử lý ngay.`)] };
+}
+
+/** @deprecated kept for callers that still want one combined summary. */
 export function formatInboxBaseline(views: InboxNotifyView[], total: number, now: number, inboxUrl: string | null) {
   const lines = views.slice(0, 8).map(view => `• *${escapeMrkdwn(view.ask)}:* ${escapeMrkdwn(clip(view.issue ? `${view.issue} · ${view.title}` : view.title, 120))} (chờ ${waitingLabel(view.since, now)})`);
   const more = total > lines.length ? `\n…và ${total - lines.length} việc khác.` : "";
@@ -91,3 +129,40 @@ export function createSlackInboxTransport(fetchImpl: typeof fetch = fetch): Slac
     },
   };
 }
+
+export type SlackBlockActionsPayload = {
+  userId: string; teamId: string | null; channelId: string | null; messageTs: string | null; responseUrl: string | null;
+  actions: Array<{ actionId: string; value: string | null }>;
+};
+
+/** Parses a Slack interactivity request body (form-encoded `payload=`); null when it is not a block_actions callback. */
+export function parseSlackBlockActions(body: string, contentType: string): SlackBlockActionsPayload | null {
+  if (!contentType.includes("application/x-www-form-urlencoded")) return null;
+  const raw = new URLSearchParams(body).get("payload");
+  if (!raw) return null;
+  let payload: Record<string, any>;
+  try { payload = JSON.parse(raw); } catch { return null; }
+  if (payload?.type !== "block_actions" || typeof payload.user?.id !== "string" || !Array.isArray(payload.actions)) return null;
+  return {
+    userId: payload.user.id,
+    teamId: typeof payload.team?.id === "string" ? payload.team.id : typeof payload.user?.team_id === "string" ? payload.user.team_id : null,
+    channelId: typeof payload.channel?.id === "string" ? payload.channel.id : typeof payload.container?.channel_id === "string" ? payload.container.channel_id : null,
+    messageTs: typeof payload.message?.ts === "string" ? payload.message.ts : typeof payload.container?.message_ts === "string" ? payload.container.message_ts : null,
+    responseUrl: typeof payload.response_url === "string" ? payload.response_url : null,
+    actions: payload.actions.filter((a: any) => typeof a?.action_id === "string").map((a: any) => ({ actionId: a.action_id, value: typeof a.value === "string" ? a.value : null })),
+  };
+}
+
+/** Private reply visible only to the clicker; response_url must be a Slack host. */
+export async function postSlackEphemeral(responseUrl: string | null, text: string, fetchImpl: typeof fetch = fetch): Promise<void> {
+  if (!responseUrl) return;
+  try {
+    const url = new URL(responseUrl);
+    if (url.protocol !== "https:" || !/(^|\.)slack\.com$/.test(url.hostname)) return;
+    await fetchImpl(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ response_type: "ephemeral", replace_original: false, text }) });
+  } catch { /* the click is already acknowledged; a lost hint is harmless */ }
+}
+
+export const INBOX_ACTION_PREFIX = "inbox:";
+/** Link buttons also trigger a callback in Slack; these carry no server action. */
+export const INBOX_LINK_ACTION_PREFIX = "inbox:link:";

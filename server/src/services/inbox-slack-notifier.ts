@@ -2,9 +2,10 @@ import { and, eq } from "drizzle-orm";
 import { chatActions, chatEndpoints, chatExternalPrincipals, chatIdentityLinks, companies, type Db } from "@paperclipai/db";
 import type { AttentionItem, AttentionSourceKind } from "@paperclipai/shared";
 import {
-  formatInboxBaseline, formatInboxNotification, formatInboxReminder, formatInboxResolved,
-  type InboxNotifyView, type SlackInboxTransport,
+  formatInboxIntro, formatInboxNotification, formatInboxReminder, formatInboxResolved,
+  type InboxButton, type InboxNotifyView, type SlackInboxTransport,
 } from "./chat-channels/slack/inbox-notify.js";
+import { buildInboxActionSpecs, persistInboxButtons, type InboxActionApi } from "./inbox-slack-actions.js";
 
 /**
  * Mirrors the board Inbox to Slack: one message per pending item, edited when
@@ -30,6 +31,8 @@ export type InboxSlackNotifierDeps = {
   connectorsEnabled: () => Promise<boolean>;
   /** Optional Slack channel/DM id that replaces the linked-user DM. */
   channelOverride?: () => string | null | undefined;
+  /** Server's own API as the board user; null disables action buttons (link buttons only). */
+  api?: InboxActionApi | null;
   /** 0 disables reminders. */
   reminderMs?: number;
   now?: () => number;
@@ -87,6 +90,21 @@ export function inboxSlackNotifier(db: Db, deps: InboxSlackNotifierDeps) {
     return pick?.userId ? { channel: pick.slackUserId, userId: pick.userId } : null;
   }
 
+  /** Action buttons (when the server can execute them) plus always-available link buttons. */
+  async function actionButtons(endpoint: typeof chatEndpoints.$inferSelect, userId: string, groupId: string, item: InboxItemSource, title: string, inboxUrl: string | null): Promise<InboxButton[]> {
+    const buttons: InboxButton[] = [];
+    if (deps.api) {
+      try {
+        const specs = await buildInboxActionSpecs(item, deps.api);
+        buttons.push(...await persistInboxButtons(db, { companyId: endpoint.companyId, endpointId: endpoint.id, groupId, userId, dedupKey: item.dedupKey, title, specs }));
+      } catch (error) { deps.log?.warn({ endpointId: endpoint.id, error: String(error) }, "Inbox Slack action buttons unavailable; sending links only"); }
+    }
+    const identifier = item.relatedIssue?.identifier ?? item.subject.identifier;
+    if (inboxUrl && identifier) buttons.push({ actionId: "inbox:link:task", text: `Mở ${identifier}`, url: inboxUrl.replace(/decisions$/, `issues/${identifier}`) });
+    if (inboxUrl) buttons.push({ actionId: "inbox:link:inbox", text: "Mở Inbox", url: inboxUrl });
+    return buttons;
+  }
+
   async function runEndpoint(endpoint: typeof chatEndpoints.$inferSelect, budget: { left: number }) {
     const recipient = await resolveRecipient(endpoint);
     if (!recipient) return;
@@ -112,34 +130,30 @@ export function inboxSlackNotifier(db: Db, deps: InboxSlackNotifierDeps) {
     const finish = (id: string, status: string, result: Record<string, unknown>) =>
       db.update(chatActions).set({ status, result, updatedAt: new Date() }).where(eq(chatActions.id, id));
 
-    // First run for this endpoint: one summary instead of flooding old items.
+    // First run for this endpoint: a one-line intro, then every pending item gets its own message
+    // through the normal path below (paced by the per-sweep send budget, oldest-waiting first).
     const baselineKey = `${INBOX_NOTIFY_KIND}:${BASELINE_KEY}`;
     if (!byKey.has(baselineKey)) {
-      // Item rows first: a crash before the marker re-runs this block harmlessly.
-      for (const [key, item] of pendingByKey) {
-        const row = await claim(key, { title: inboxNotifyView(item).title, baseline: true });
-        if (row) await finish(row.id, "baseline", { baseline: true });
-      }
       const baseline = await claim(baselineKey, { items: pending.length });
       if (!baseline) return;
       if (pending.length === 0) { await finish(baseline.id, "processed", { skipped: "empty" }); return; }
-      const message = formatInboxBaseline(pending.map(inboxNotifyView), pending.length, at, inboxUrl);
       try {
-        const sent = await deps.transport.post({ token, channel: recipient.channel, ...message });
+        const sent = await deps.transport.post({ token, channel: recipient.channel, ...formatInboxIntro(pending.length) });
         await finish(baseline.id, "processed", { ...sent, sentAt: new Date(at).toISOString() });
-      } catch { await finish(baseline.id, "uncertain", { code: "slack_baseline_unconfirmed" }); }
-      return;
+      } catch { await finish(baseline.id, "uncertain", { code: "slack_baseline_unconfirmed" }); return; }
     }
 
     // 1) New pending items → one message each.
-    for (const [key, item] of pendingByKey) {
+    const ordered = [...pendingByKey].sort(([, a], [, b]) => Date.parse(a.activityAt) - Date.parse(b.activityAt));
+    for (const [key, item] of ordered) {
       if (byKey.has(key) || budget.left <= 0) continue;
       const view = inboxNotifyView(item);
       const row = await claim(key, { title: view.title, ask: view.ask });
       if (!row) continue;
       budget.left -= 1;
       try {
-        const sent = await deps.transport.post({ token, channel: recipient.channel, ...formatInboxNotification(view, at, inboxUrl) });
+        const buttons = await actionButtons(endpoint, recipient.userId, row.id, item, view.title, inboxUrl);
+        const sent = await deps.transport.post({ token, channel: recipient.channel, ...formatInboxNotification(view, at, inboxUrl, buttons) });
         await finish(row.id, "processed", { ...sent, sentAt: new Date(at).toISOString(), state: "open" });
       } catch { await finish(row.id, "uncertain", { code: "slack_inbox_notify_unconfirmed" }); }
     }
