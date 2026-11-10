@@ -36,6 +36,7 @@ import { createPhotonRuntimeCallbacks, discardPhotonInboundMessages, photonRunti
 import { createChatReceiverOwnership } from "./chat-channels/runtime/ownership.js";
 import { createGitHubWebhookScope, githubWebhookCanRecoverRevokedInstallation } from "./chat-channels/github/webhook-scope.js";
 import { createGitHubWebhookAuthentication, retryableGitHubWebhookResponse } from "./chat-channels/github/webhook-authentication.js";
+import { createSlackInboxInteractions, type InboxClickHandler } from "./chat-channels/slack/inbox-interactions.js";
 import { createSlackWebhookCallbacks } from "./chat-channels/slack/webhook-callbacks.js";
 import { createGitHubWebhookEvents } from "./chat-channels/github/webhook-events.js";
 import { createSlackTaskStartResolution } from "./chat-channels/slack/task-start-resolution.js";
@@ -898,6 +899,8 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
   const { handleGitHubWebhookEvent } = createGitHubWebhookEvents(db, { processMessage, recordLifecycleDelivery: (...args) => recordLifecycleDelivery(...args), githubAutomaticMessages, githubIssueMessages, fetchImpl, runtimeCallbackEndpoint });
 
   const { authenticateGitHubWebhook } = createGitHubWebhookAuthentication(db, { endpointRecord, runtimeContextForRecord, withCredentialMutationLease, resolveCredentials, reconcileGitHubWebhookRepository, stageGitHubWebhookIngress, processGitHubWebhookIngress, githubIngressAcceptedResponse, scheduleMessageProcessing, backgroundMessageTasks, redactError, get githubWebhookAuthenticationBarrier() { return options.githubWebhookAuthenticationBarrier; }, get deferWebhookProcessing() { return options.deferWebhookProcessing; } });
+  let inboxClickHandler: InboxClickHandler | null = null;
+  const handleSlackInboxCallback = createSlackInboxInteractions(db, { resolveCredentials, handler: () => inboxClickHandler });
   const { inspectSlackWebhookScope, recordSlackWebhookCallback } = createSlackWebhookCallbacks(db, { resolveCredentials, runtimeCallbackEndpoint, getWebhookPublicBaseUrl, scheduleMessageProcessing, slackRegistration: { notifyVerified: (endpointId) => slackRegistration.notifyVerified(endpointId) } });
 
   const { reconcileDiscordRuntime } = createDiscordRuntimeReconciliation(db, { endpointRecord, runtimeContexts, invalidateRuntime, runtimeFor, runtime, runtimeCallbackEndpoint, credentialFingerprint, discordGatewayRuntimeIsCurrent });
@@ -2980,6 +2983,8 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     if (provider === "slack") {
       const response = await inspectSlackWebhookScope(endpoint, request);
       if (response) return response;
+      const inboxResponse = await handleSlackInboxCallback(endpoint, request);
+      if (inboxResponse) return inboxResponse;
     }
 
     const lifecycleInspection = request.clone();
@@ -3528,6 +3533,8 @@ return {
     sendSlackTestMessage,
     /** Credentials and origin the Inbox→Slack notifier needs; no second token path. */
     slackInboxAccess: {
+      /** Registered by the server bootstrap, which owns the attention feed and the self-API. */
+      setClickHandler: (handler: InboxClickHandler | null) => { inboxClickHandler = handler; },
       botToken: async (endpointId: string) => {
         const record = await endpointRecord(endpointId);
         return record ? (await resolveCredentials(record.endpoint)).botToken ?? null : null;

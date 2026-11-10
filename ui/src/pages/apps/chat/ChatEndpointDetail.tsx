@@ -1077,7 +1077,10 @@ function Activity({
           <p>
             <span className="font-medium">Buttons in Slack won&apos;t work yet.</span>{" "}
             Slack has not called the Interactivity URL, so approving or answering from a Slack message will fail until it is verified.
-            Open “Connection health and controls” below and re-save the App Manifest, then press a button in Slack once.
+            In your Slack app settings, open <span className="font-medium">Interactivity &amp; Shortcuts</span>, turn Interactivity on, and set the Request URL to the address below, then press a button in Slack once.
+            {endpoint.setup.webhookUrl && (
+              <code className="mt-1 block break-all rounded bg-muted px-2 py-1 text-xs select-all">{endpoint.setup.webhookUrl}</code>
+            )}
           </p>
         </div>
       )}

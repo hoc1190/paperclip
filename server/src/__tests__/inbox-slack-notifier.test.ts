@@ -7,7 +7,8 @@ import {
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { inboxNotifyView, inboxSlackNotifier, type InboxItemSource } from "../services/inbox-slack-notifier.js";
-import { formatInboxNotification, waitingLabel, type SlackInboxTransport } from "../services/chat-channels/slack/inbox-notify.js";
+import { formatInboxNotification, parseSlackBlockActions, waitingLabel, type SlackInboxTransport } from "../services/chat-channels/slack/inbox-notify.js";
+import { handleInboxClick, type InboxActionApi, type InboxRequest } from "../services/inbox-slack-actions.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDatabase = support.supported ? describe : describe.skip;
@@ -43,7 +44,7 @@ describeDatabase("inbox Slack notifier", () => {
   let endpointId: string;
   let pending: InboxItemSource[];
   let clock: number;
-  let posts: Array<{ channel: string; text: string; threadTs?: string }>;
+  let posts: Array<{ channel: string; text: string; threadTs?: string; blocks: any[] }>;
   let updates: Array<{ ts: string; text: string }>;
   let failPosts = false;
   let enabled = true;
@@ -52,7 +53,7 @@ describeDatabase("inbox Slack notifier", () => {
   const transport: SlackInboxTransport = {
     async post(args) {
       if (failPosts) throw new Error("slack down");
-      posts.push({ channel: args.channel, text: args.text, threadTs: args.threadTs });
+      posts.push({ channel: args.channel, text: args.text, threadTs: args.threadTs, blocks: args.blocks as any[] });
       return { channel: "D123", ts: `ts-${posts.length}` };
     },
     async update(args) { updates.push({ ts: args.ts, text: args.text }); },
@@ -85,21 +86,33 @@ describeDatabase("inbox Slack notifier", () => {
 
   const rows = () => db.select().from(chatActions).where(and(eq(chatActions.endpointId, endpointId), eq(chatActions.kind, "inbox_notify")));
 
-  it("sends one baseline summary for existing items, then one message per new item, never twice", async () => {
+  it("sends a one-line intro, then one separate message per existing and new item, never twice", async () => {
     pending = [item("old1"), item("old2")];
     const notifier = make();
     await notifier.runOnce();
-    expect(posts).toHaveLength(1);
+    expect(posts).toHaveLength(3);
     expect(posts[0]).toMatchObject({ channel: "U777" });
     expect(posts[0]!.text).toContain("2 việc");
+    expect(posts.slice(1).map(post => post.text).join("|")).toContain("Task old1");
+    expect(posts.slice(1).map(post => post.text).join("|")).toContain("Task old2");
     await notifier.runOnce();
-    expect(posts).toHaveLength(1);
+    expect(posts).toHaveLength(3);
 
     pending = [item("old1"), item("old2"), item("new1")];
     await notifier.runOnce();
     await notifier.runOnce();
-    expect(posts).toHaveLength(2);
-    expect(posts[1]!.text).toContain("Task new1");
+    expect(posts).toHaveLength(4);
+    expect(posts[3]!.text).toContain("Task new1");
+  });
+
+  it("paces a backlog: at most 10 item messages per sweep, oldest-waiting first", async () => {
+    pending = Array.from({ length: 12 }, (_, index) => item(`b${index}`, { activityAt: new Date(index * 1000).toISOString() }, `Task b${index}`));
+    const notifier = make();
+    await notifier.runOnce();
+    expect(posts).toHaveLength(11);
+    expect(posts[1]!.text).toContain("Task b0");
+    await notifier.runOnce();
+    expect(posts).toHaveLength(13);
   });
 
   it("edits the message once when the item leaves the pending set", async () => {
@@ -169,5 +182,118 @@ describeDatabase("inbox Slack notifier", () => {
     pending = [item("n1")];
     await make({ channelOverride: () => "C999" }).runOnce();
     expect(posts[0]).toMatchObject({ channel: "C999" });
+  });
+
+  describe("action buttons", () => {
+    const question = (id: string) => ({
+      id, kind: "ask_user_questions", status: "pending",
+      payload: { version: 1, questions: [{ id: "q1", prompt: "Chạy lại?", selectionMode: "single", options: [{ id: "o1", label: "Giữ dừng" }, { id: "o2", label: "Chạy tiếp" }] }] },
+    });
+    const questionItem = (key: string) => item(key, {
+      sourceKind: "issue_thread_interaction", relatedIssue: { id: "issue-1", identifier: "HOC-17", title: "Sprint" } as InboxItemSource["relatedIssue"],
+      subject: { kind: "issue_thread_interaction", id: key, title: "Chạy lại 52 email?" } as InboxItemSource["subject"],
+    });
+    let requests: InboxRequest[];
+    let apiOk = true;
+    const api = (interactions: any[]): InboxActionApi => ({
+      interactions: async () => interactions as never,
+      decision: async () => null,
+      request: async request => { requests.push(request); return apiOk ? { ok: true, status: 200 } : { ok: false, status: 409, message: "conflict" }; },
+    });
+    const buttonsOf = (post: { blocks: any[] }) => post.blocks.filter(block => block.type === "actions").flatMap(block => block.elements);
+    const clickFor = (actionId: string, slackUserId = "U777") => ({ userId: slackUserId, teamId: "T1", channelId: "D123", messageTs: "ts-1", responseUrl: null, actions: [{ actionId, value: actionId }] });
+    const clickDeps = (override: Partial<Parameters<typeof handleInboxClick>[1]> = {}) => ({
+      transport, token: async () => "xoxb-fake", api: api([question("qa")]), listPending: async () => pending, ...override,
+    });
+    const endpointRow = async () => (await db.select().from(chatEndpoints).where(eq(chatEndpoints.id, endpointId)))[0]!;
+    const setup = async () => {
+      requests = []; apiOk = true;
+      await make({ api: api([question("qa")]) }).runOnce(); // empty baseline
+      pending = [questionItem("qa")];
+      await make({ api: api([question("qa")]) }).runOnce();
+      return buttonsOf(posts[0]!);
+    };
+
+    it("offers one button per answer plus Open links, persisting each button server-side", async () => {
+      const buttons = await setup();
+      expect(buttons.map((button: any) => button.text.text)).toEqual(["Giữ dừng", "Chạy tiếp", "Mở HOC-17", "Mở Inbox"]);
+      expect(buttons.filter((button: any) => button.action_id.startsWith("inbox:link:")).every((button: any) => button.url)).toBe(true);
+      const stored = await db.select().from(chatActions).where(eq(chatActions.kind, "inbox_action"));
+      expect(stored).toHaveLength(2);
+    });
+
+    it("click resolves through the web API route, updates the message, and blocks a second click", async () => {
+      const buttons = await setup();
+      const first = buttons[0].action_id;
+      await handleInboxClick(db, clickDeps(), await endpointRow(), clickFor(first));
+      expect(requests).toEqual([{ method: "POST", path: "/issues/issue-1/interactions/qa/respond", body: { answers: [{ questionId: "q1", optionIds: ["o1"] }] } }]);
+      expect(updates.at(-1)!.text).toContain("Giữ dừng");
+      await handleInboxClick(db, clickDeps(), await endpointRow(), clickFor(buttons[1].action_id));
+      expect(requests).toHaveLength(1);
+      // the later "left the pending set" sweep must not overwrite the recorded choice
+      pending = [];
+      const before = updates.length;
+      await make().runOnce();
+      expect(updates).toHaveLength(before);
+    });
+
+    it("rejects a click from a Slack account that is not linked to the recipient", async () => {
+      const buttons = await setup();
+      await handleInboxClick(db, clickDeps(), await endpointRow(), clickFor(buttons[0].action_id, "UOTHER"));
+      expect(requests).toHaveLength(0);
+      expect(updates).toHaveLength(0);
+    });
+
+    it("treats a click on an already-resolved item as stale and does nothing", async () => {
+      const buttons = await setup();
+      pending = [];
+      await handleInboxClick(db, clickDeps(), await endpointRow(), clickFor(buttons[0].action_id));
+      expect(requests).toHaveLength(0);
+      expect(updates.at(-1)!.text).toContain("Đã xử lý");
+    });
+
+    it("releases the claim when the server rejects the action so the user can retry", async () => {
+      const buttons = await setup();
+      apiOk = false;
+      await handleInboxClick(db, clickDeps(), await endpointRow(), clickFor(buttons[0].action_id));
+      apiOk = true;
+      await handleInboxClick(db, clickDeps(), await endpointRow(), clickFor(buttons[0].action_id));
+      expect(requests).toHaveLength(2);
+      expect(updates).toHaveLength(1);
+    });
+
+    it("ignores link-button callbacks and unknown ids without touching the server", async () => {
+      const buttons = await setup();
+      await handleInboxClick(db, clickDeps(), await endpointRow(), clickFor("inbox:link:inbox"));
+      await handleInboxClick(db, clickDeps(), await endpointRow(), clickFor("inbox:nope"));
+      expect(requests).toHaveLength(0);
+      expect(buttons.length).toBeGreaterThan(0);
+    });
+
+    it("gives blocked tasks Done/Cancel buttons that ask for confirmation", async () => {
+      await make({ api: api([]) }).runOnce();
+      pending = [item("b1", { sourceKind: "blocker_attention", subject: { kind: "issue", id: "issue-9", title: "Kẹt", identifier: "HOC-49" } as InboxItemSource["subject"] })];
+      await make({ api: api([]) }).runOnce();
+      const buttons = buttonsOf(posts[0]!);
+      expect(buttons.slice(0, 2).map((button: any) => button.text.text)).toEqual(["Đánh dấu xong", "Huỷ task"]);
+      expect(buttons[0].confirm).toBeTruthy();
+      expect(buttons[1]).toMatchObject({ style: "danger" });
+      expect(buttons[1].confirm).toBeTruthy();
+    });
+
+    it("falls back to link buttons when the server cannot execute actions", async () => {
+      await make({ api: null }).runOnce();
+      pending = [questionItem("qa")];
+      await make({ api: null }).runOnce();
+      expect(buttonsOf(posts[0]!).map((button: any) => button.text.text)).toEqual(["Mở HOC-17", "Mở Inbox"]);
+      expect(await db.select().from(chatActions).where(eq(chatActions.kind, "inbox_action"))).toHaveLength(0);
+    });
+
+    it("parses only block_actions form payloads", () => {
+      const payload = JSON.stringify({ type: "block_actions", user: { id: "U1" }, team: { id: "T1" }, actions: [{ action_id: "inbox:abc" }], container: { channel_id: "D1", message_ts: "1.2" } });
+      expect(parseSlackBlockActions(`payload=${encodeURIComponent(payload)}`, "application/x-www-form-urlencoded")).toMatchObject({ userId: "U1", teamId: "T1", channelId: "D1", messageTs: "1.2" });
+      expect(parseSlackBlockActions(payload, "application/json")).toBeNull();
+      expect(parseSlackBlockActions(`payload=${encodeURIComponent('{"type":"view_submission"}')}`, "application/x-www-form-urlencoded")).toBeNull();
+    });
   });
 });
