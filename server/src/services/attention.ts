@@ -1447,6 +1447,8 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         const failedRunId = (recovery.evidence as { latestRunId?: unknown } | null)?.latestRunId;
         const failedRunReason = typeof failedRunId === "string" ? recoveryRunErrors.get(failedRunId) ?? null : null;
         if (!sourceIssue) continue;
+        // A restart-containment notice about a task that is already done/cancelled has nothing left to decide.
+        if (recovery.cause === "native_restart_recovery_blocked" && ["done", "cancelled"].includes(String(sourceIssue.status))) continue;
         const recoveryIssue = recovery.recoveryIssueId ? recoveryIssueMap.get(recovery.recoveryIssueId) ?? null : null;
         const dedupKey = `recovery:${recovery.kind}:${recovery.sourceIssueId}:${recovery.cause}:${recovery.fingerprint}`;
         add(createItem({
