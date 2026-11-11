@@ -1,10 +1,11 @@
 import { randomBytes } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { chatActions, chatEndpoints, chatExternalPrincipals, chatIdentityLinks, type Db } from "@paperclipai/db";
 import type { AskUserQuestionsInteraction, IssueThreadInteraction } from "@paperclipai/shared";
 import {
-  INBOX_ACTION_PREFIX, INBOX_LINK_ACTION_PREFIX, formatInboxResolved, formatInboxStillPending, postSlackEphemeral, type InboxButton, type SlackBlockActionsPayload, type SlackInboxTransport,
+  INBOX_ACTION_PREFIX, INBOX_LINK_ACTION_PREFIX, formatInboxResolved, formatInboxStillPending, inboxActionBlocks, inboxThreadNotice, postSlackEphemeral, type InboxButton, type SlackBlockActionsPayload, type SlackInboxTransport,
 } from "./chat-channels/slack/inbox-notify.js";
+import { matchInboxReply, type ReplyOption, type SlackThreadReply } from "./chat-channels/slack/inbox-reply.js";
 import type { InboxItemSource } from "./inbox-slack-notifier.js";
 import { nativeChatConfirmation, nativeChatCustomQuestion, nativeChatQuestion } from "./chat-interaction-publications.js";
 
@@ -132,12 +133,14 @@ export async function persistInboxButtons(db: Db, input: {
   companyId: string; endpointId: string; groupId: string; userId: string; dedupKey: string; title: string; specs: ButtonSpec[];
 }): Promise<InboxButton[]> {
   const buttons: InboxButton[] = [];
-  for (const spec of input.specs) {
+  for (const [position, spec] of input.specs.entries()) {
     const token = randomBytes(12).toString("base64url");
     const actionId = `${INBOX_ACTION_PREFIX}${token}`;
     await db.insert(chatActions).values({
       companyId: input.companyId, endpointId: input.endpointId, kind: INBOX_ACTION_KIND, providerActionId: actionId, status: "ready",
-      payload: { groupId: input.groupId, userId: input.userId, dedupKey: input.dedupKey, title: input.title, label: spec.label, choice: spec.choice, request: spec.request },
+      payload: { groupId: input.groupId, userId: input.userId, dedupKey: input.dedupKey, title: input.title, label: spec.label, choice: spec.choice, request: spec.request,
+        // Kept so a thread reply can be matched to this button and re-offered with the same dialog.
+        index: position + 1, style: spec.style ?? null, confirm: spec.confirm ?? null },
     });
     buttons.push({ actionId, text: spec.label, style: spec.style, confirm: spec.confirm });
   }
@@ -153,7 +156,10 @@ export type InboxClickDeps = {
   log?: { warn: (obj: object, msg: string) => void };
 };
 
-type ButtonPayload = { groupId: string; userId: string; dedupKey: string; title: string; label: string; choice: string; request: InboxRequest };
+type ButtonPayload = {
+  groupId: string; userId: string; dedupKey: string; title: string; label: string; choice: string; request: InboxRequest;
+  index?: number; style?: "primary" | "danger" | null; confirm?: InboxButton["confirm"] | null;
+};
 
 /**
  * Handles one verified Slack block_actions callback for `inbox:` buttons. The caller has already
@@ -173,15 +179,37 @@ export async function handleInboxClick(db: Db, deps: InboxClickDeps, endpoint: t
   const payload = row.payload as unknown as ButtonPayload;
 
   // The clicking Slack account must be linked to the Paperclip user the message was sent to.
-  const links = endpoint.providerAccountId ? await db.select({ id: chatIdentityLinks.id }).from(chatIdentityLinks)
+  if (!(await senderIsLinked(db, endpoint, payload.userId, click.userId))) {
+    await tell("Tài khoản Slack này chưa được liên kết với người nhận tin này nên không thể xử lý từ Slack."); return true;
+  }
+  await executeInboxButton(db, deps, endpoint, row, payload, { slackUserId: click.userId, actionId: action.actionId, tell });
+  return true;
+}
+
+/** True when the Slack account is linked to the Paperclip board user an Inbox message was sent to. */
+async function senderIsLinked(db: Db, endpoint: typeof chatEndpoints.$inferSelect, paperclipUserId: string, slackUserId: string): Promise<boolean> {
+  if (!endpoint.providerAccountId) return false;
+  const links = await db.select({ id: chatIdentityLinks.id }).from(chatIdentityLinks)
     .innerJoin(chatExternalPrincipals, and(eq(chatExternalPrincipals.id, chatIdentityLinks.principalId), eq(chatExternalPrincipals.companyId, chatIdentityLinks.companyId)))
     .where(and(
       eq(chatIdentityLinks.companyId, endpoint.companyId), eq(chatIdentityLinks.endpointId, endpoint.id), eq(chatIdentityLinks.status, "linked"),
-      eq(chatIdentityLinks.paperclipUserId, payload.userId), eq(chatExternalPrincipals.provider, "slack"),
-      eq(chatExternalPrincipals.providerAccountId, endpoint.providerAccountId), eq(chatExternalPrincipals.externalId, click.userId),
-    )) : [];
-  if (links.length === 0) { await tell("Tài khoản Slack này chưa được liên kết với người nhận tin này nên không thể xử lý từ Slack."); return true; }
+      eq(chatIdentityLinks.paperclipUserId, paperclipUserId), eq(chatExternalPrincipals.provider, "slack"),
+      eq(chatExternalPrincipals.providerAccountId, endpoint.providerAccountId), eq(chatExternalPrincipals.externalId, slackUserId),
+    ));
+  return links.length > 0;
+}
 
+type ExecuteContext = { slackUserId: string; actionId: string; tell: (text: string) => Promise<void> };
+
+/**
+ * Runs one authorized button: stale check, single-winner claim, the same API request the Inbox
+ * uses, and the final message edit. Shared by clicks and by thread replies matched to a button.
+ */
+async function executeInboxButton(
+  db: Db, deps: InboxClickDeps, endpoint: typeof chatEndpoints.$inferSelect,
+  row: typeof chatActions.$inferSelect, payload: ButtonPayload, ctx: ExecuteContext,
+): Promise<boolean> {
+  const { tell } = ctx;
   const [group] = await db.select().from(chatActions).where(and(eq(chatActions.id, payload.groupId), eq(chatActions.endpointId, endpoint.id)));
   const groupResult = group?.result as { channel?: string; ts?: string; state?: string } | null | undefined;
   const token = await deps.token(endpoint.id);
@@ -193,28 +221,28 @@ export async function handleInboxClick(db: Db, deps: InboxClickDeps, endpoint: t
     }
   };
 
-  if (groupResult?.state === "resolved") { await tell("Việc này đã được xử lý rồi."); return true; }
+  if (groupResult?.state === "resolved") { await tell("Việc này đã được xử lý rồi."); return false; }
   // Still pending? The web UI or another click may have resolved it first.
   let stillPending: boolean;
   try { stillPending = (await deps.listPending(endpoint.companyId, payload.userId)).some(item => item.dedupKey === payload.dedupKey); }
-  catch { await tell("Không kiểm tra được trạng thái hiện tại. Thử lại sau hoặc mở Inbox."); return true; }
-  if (!stillPending) { await settle("đã xử lý ở nơi khác", "resolved"); await tell("Việc này đã được xử lý rồi."); return true; }
-  if (!deps.api) { await tell("Chưa hỗ trợ xử lý từ Slack ở chế độ triển khai này. Hãy mở Inbox."); return true; }
+  catch { await tell("Không kiểm tra được trạng thái hiện tại. Thử lại sau hoặc mở Inbox."); return false; }
+  if (!stillPending) { await settle("đã xử lý ở nơi khác", "resolved"); await tell("Việc này đã được xử lý rồi."); return false; }
+  if (!deps.api) { await tell("Chưa hỗ trợ xử lý từ Slack ở chế độ triển khai này. Hãy mở Inbox."); return false; }
 
   // One click wins; sibling buttons and double clicks are rejected by this unique claim.
   const claimKey = `${CLAIM_KIND}:${payload.groupId}`;
   const [claim] = await db.insert(chatActions).values({
     companyId: endpoint.companyId, endpointId: endpoint.id, kind: CLAIM_KIND, providerActionId: claimKey, status: "processing",
-    payload: { actionId: action.actionId, slackUserId: click.userId },
+    payload: { actionId: ctx.actionId, slackUserId: ctx.slackUserId },
   }).onConflictDoNothing().returning();
-  if (!claim) { await tell("Việc này đang/đã được xử lý rồi."); return true; }
+  if (!claim) { await tell("Việc này đang/đã được xử lý rồi."); return false; }
 
   const result = await deps.api.request(payload.request);
   if (!result.ok) {
     // Release the claim so the user can retry or use the Inbox; nothing was applied.
     await db.delete(chatActions).where(eq(chatActions.id, claim.id));
     await tell(`Không xử lý được (${result.message ?? result.status}). Hãy mở Inbox để xử lý.`);
-    return true;
+    return false;
   }
   await db.update(chatActions).set({ status: "processed", result: { status: result.status }, updatedAt: new Date() }).where(eq(chatActions.id, claim.id));
   await db.update(chatActions).set({ status: "processed", updatedAt: new Date() }).where(eq(chatActions.id, row.id));
@@ -228,8 +256,85 @@ export async function handleInboxClick(db: Db, deps: InboxClickDeps, endpoint: t
       catch (error) { deps.log?.warn({ endpointId: endpoint.id, error: String(error) }, "Inbox Slack message could not be updated after a click"); }
     }
     await tell("Đã thực hiện, nhưng việc này vẫn đang chờ trong Inbox. Hãy mở Inbox để hoàn tất.");
-    return true;
+    return false;
   }
   await settle(payload.choice, "resolved");
+  return true;
+}
+
+const REPLY_CLAIM_KIND = "inbox_reply_claim";
+
+const isDestructive = (payload: ButtonPayload) =>
+  Boolean(payload.confirm) || payload.request.path.endsWith("/reject") || payload.request.body?.status === "cancelled";
+
+const hintOf = (payload: ButtonPayload): ReplyOption["hint"] =>
+  payload.request.path.endsWith("/accept") ? "accept" : payload.request.path.endsWith("/reject") ? "reject" : null;
+
+/** Re-offers a stored button; destructive ones that predate stored dialogs get a generic confirmation. */
+const reofferButton = (row: typeof chatActions.$inferSelect, payload: ButtonPayload): InboxButton => ({
+  actionId: row.providerActionId, text: payload.label, style: payload.style ?? undefined,
+  confirm: payload.confirm ?? (isDestructive(payload) ? { title: payload.label, text: "Hành động này không hoàn tác được.", confirm: "Xác nhận", deny: "Huỷ" } : undefined),
+});
+
+/**
+ * Handles a user's thread reply under an Inbox notification. Returns true when the reply belonged to
+ * an open Inbox message that has answer buttons (the caller must then NOT forward it to the agent);
+ * false leaves the message to the normal chat pipeline. The caller has verified signature and workspace.
+ *
+ * A reply resolves the item only when it maps to exactly one non-destructive button; the work is then
+ * done by the same executor the button click uses, so stale checks, the single-winner claim and the
+ * API request are identical. Ambiguous text never resolves anything.
+ */
+export async function handleInboxThreadReply(db: Db, deps: InboxClickDeps, endpoint: typeof chatEndpoints.$inferSelect, reply: SlackThreadReply): Promise<boolean> {
+  const [group] = await db.select().from(chatActions).where(and(
+    eq(chatActions.endpointId, endpoint.id), eq(chatActions.companyId, endpoint.companyId), eq(chatActions.kind, "inbox_notify"), eq(chatActions.status, "processed"),
+    sql`${chatActions.result}->>'ts' = ${reply.threadTs}`, sql`${chatActions.result}->>'channel' = ${reply.channel}`, sql`${chatActions.result}->>'state' = 'open'`,
+  ));
+  if (!group) return false;
+  const rows = await db.select().from(chatActions).where(and(
+    eq(chatActions.endpointId, endpoint.id), eq(chatActions.kind, INBOX_ACTION_KIND), sql`${chatActions.payload}->>'groupId' = ${group.id}`,
+  )).orderBy(asc(chatActions.createdAt));
+  if (rows.length === 0) return false; // link-only message: nothing to answer, leave it to the agent
+
+  // Slack redelivers events; one reply is processed at most once.
+  const [claim] = await db.insert(chatActions).values({
+    companyId: endpoint.companyId, endpointId: endpoint.id, kind: REPLY_CLAIM_KIND, providerActionId: `${REPLY_CLAIM_KIND}:${reply.channel}:${reply.ts}`,
+    status: "processing", payload: { groupId: group.id, slackUserId: reply.userId },
+  }).onConflictDoNothing().returning();
+  if (!claim) return true;
+
+  const token = await deps.token(endpoint.id);
+  if (!token) return true;
+  const say = async (text: string, blocks?: unknown[]) => {
+    try { await deps.transport.post({ token, channel: reply.channel, threadTs: reply.threadTs, ...inboxThreadNotice(text, blocks) }); }
+    catch (error) { deps.log?.warn({ endpointId: endpoint.id, error: String(error) }, "Inbox Slack thread reply could not be posted"); }
+  };
+
+  const buttons = rows.map(row => ({ row, payload: row.payload as unknown as ButtonPayload }))
+    .sort((a, b) => (a.payload.index ?? 0) - (b.payload.index ?? 0));
+  const owner = buttons[0]!.payload.userId;
+  if (!(await senderIsLinked(db, endpoint, owner, reply.userId))) {
+    const hint = "Tài khoản Slack này chưa được liên kết với người nhận tin này nên không thể xử lý từ Slack.";
+    if (deps.transport.ephemeral) { try { await deps.transport.ephemeral({ token, channel: reply.channel, user: reply.userId, text: hint, threadTs: reply.threadTs }); } catch { /* best effort */ } }
+    else await say(hint);
+    return true;
+  }
+
+  const options: ReplyOption[] = buttons.map(({ payload }, position) => ({ index: payload.index ?? position + 1, label: payload.label, hint: hintOf(payload) }));
+  const match = matchInboxReply(reply.text, options);
+  if (match.kind === "none") {
+    await say(
+      "Mình chưa chắc bạn chọn đáp án nào nên chưa ghi gì. Chọn một nút bên dưới hoặc mở Inbox. Tin nhắn này chưa được lưu làm câu trả lời; muốn bình luận cho agent, hãy ghi trên task trong Paperclip.",
+      inboxActionBlocks(buttons.map(({ row, payload }) => reofferButton(row, payload))),
+    );
+    return true;
+  }
+  const chosen = buttons.find(({ payload }, position) => (payload.index ?? position + 1) === match.option.index)!;
+  if (isDestructive(chosen.payload)) {
+    await say(`"${chosen.payload.label}" không hoàn tác được nên mình không làm từ tin nhắn chữ. Hãy bấm nút "${chosen.payload.label}" ở tin gốc để xác nhận.`);
+    return true;
+  }
+  const done = await executeInboxButton(db, deps, endpoint, chosen.row, chosen.payload, { slackUserId: reply.userId, actionId: chosen.row.providerActionId, tell: say });
+  if (done) await say(`Đã ghi: ${chosen.payload.choice}`);
   return true;
 }
