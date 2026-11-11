@@ -63,6 +63,7 @@ export function inboxNotifyView(item: InboxItemSource): InboxNotifyView {
     agent: item.originAgentName ?? null,
     issue: item.relatedIssue?.identifier ?? item.subject.identifier ?? null,
     since: item.activityAt,
+    kind: item.sourceKind,
   };
 }
 

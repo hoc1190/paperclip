@@ -36,6 +36,13 @@ describe("inbox Slack formatting", () => {
     expect(JSON.stringify(formatInboxNotification(inboxNotifyView(item("a")), 0, null).blocks)).not.toContain("Mở Inbox");
     expect(waitingLabel(new Date(0).toISOString(), 30 * 60_000)).toBe("30 phút");
   });
+  it("always states what the reader has to do", () => {
+    const view = inboxNotifyView(item("a"));
+    const linkOnly = JSON.stringify(formatInboxNotification(view, 0, "https://x.test/HOC/decisions").blocks);
+    expect(linkOnly).toContain("Bạn làm:* mở link");
+    const withButton = JSON.stringify(formatInboxNotification(view, 0, null, [{ actionId: "inbox:a", text: "Có" }]).blocks);
+    expect(withButton).toContain("Bạn làm:* bấm một nút");
+  });
 });
 
 describe("Slack thread reply parsing and matching", () => {
