@@ -10,6 +10,8 @@ export type InboxNotifyView = {
   agent: string | null;
   issue: string | null;
   since: string;
+  /** Inbox source kind; lets the message say whether a reply in the thread also works. */
+  kind?: string;
 };
 
 export type SlackPostArgs = { token: string; channel: string; text: string; blocks: unknown[]; threadTs?: string };
@@ -79,11 +81,19 @@ export function inboxActionBlocks(buttons: InboxButton[]): unknown[] {
   return blocks;
 }
 
+/** One explicit line saying what the reader has to do, so no message leaves them guessing. */
+function todoLine(view: InboxNotifyView, buttons: InboxButton[]): string {
+  const hasAnswerButtons = buttons.some(button => !button.url);
+  if (hasAnswerButtons) return `👉 *Bạn làm:* bấm một nút bên dưới${view.kind === "issue_thread_interaction" ? " (hoặc trả lời ngay trong thread này)" : ""}.`;
+  return "👉 *Bạn làm:* mở link để xử lý — loại này không trả lời nhanh được trong Slack.";
+}
+
 export function formatInboxNotification(view: InboxNotifyView, now: number, inboxUrl: string | null, buttons: InboxButton[] = []) {
   const { plain, head, meta } = describe(view, now);
   const blocks: unknown[] = [section(head)];
   const detail = view.detail ? escapeMrkdwn(clip(view.detail, 400)) : null;
   if (detail) blocks.push(section(detail));
+  blocks.push(section(todoLine(view, buttons)));
   blocks.push(context([meta, buttons.length ? null : inboxLink(inboxUrl)].filter(Boolean).join(" · ")));
   blocks.push(...inboxActionBlocks(buttons));
   return { text: plain, blocks };
