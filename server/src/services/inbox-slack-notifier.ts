@@ -111,7 +111,8 @@ export function inboxSlackNotifier(db: Db, deps: InboxSlackNotifierDeps) {
     const token = await deps.token(endpoint.id);
     if (!token) return;
     // A failed read must never look like "everything was resolved".
-    const pending = await deps.listPending(endpoint.companyId, recipient.userId);
+    // Recovery actions are operator housekeeping with nothing to answer in Slack; they stay on the Inbox page.
+    const pending = (await deps.listPending(endpoint.companyId, recipient.userId)).filter(item => item.sourceKind !== "recovery_action");
     const [company] = await db.select({ prefix: companies.issuePrefix }).from(companies).where(eq(companies.id, endpoint.companyId));
     const base = deps.baseUrl()?.replace(/\/+$/, "");
     const inboxUrl = base && company ? `${base}/${company.prefix}/decisions` : null;

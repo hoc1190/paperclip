@@ -83,8 +83,14 @@ function HistoryPanel({ companyId, agents, onClose, mobile = false }: { companyI
 function askLabel(kind: "interaction" | "decision" | "stalled" | "review") {
   return kind === "interaction" ? "Needs your answer" : kind === "decision" ? "Needs your decision" : kind === "stalled" ? "Stuck in review — pick how to continue" : "Needs your review";
 }
-function AskBanner({ kind, from, since }: { kind: "interaction" | "decision" | "stalled" | "review"; from?: string | null; since: string }) {
-  return <p className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground"><span className="rounded-full bg-primary/10 px-2 py-0.5 font-medium text-foreground">{askLabel(kind)}</span>{from ? <span>from {from}</span> : null}<span>· waiting {timeAgo(since)}</span></p>;
+const OTHER_ASK_LABELS: Record<string, string> = {
+  recovery_action: "Needs your confirmation — recovery step", blocker_attention: "Task is blocked — needs your help",
+  failed_run: "Run failed — needs a look", agent_error_alert: "Agent in error — needs a look",
+  approval: "Needs your approval", join_request: "Needs your approval", budget_alert: "Budget alert — needs a look",
+};
+function AskBanner({ kind, sourceKind, from, since }: { kind: "interaction" | "decision" | "stalled" | "review"; sourceKind?: string; from?: string | null; since: string }) {
+  const label = kind === "review" && sourceKind && OTHER_ASK_LABELS[sourceKind] ? OTHER_ASK_LABELS[sourceKind] : askLabel(kind);
+  return <p className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground"><span className="rounded-full bg-primary/10 px-2 py-0.5 font-medium text-foreground">{label}</span>{from ? <span>from {from}</span> : null}<span>· waiting {timeAgo(since)}</span></p>;
 }
 
 export function CoordinatorNeedsYou() {
@@ -240,7 +246,7 @@ export function CoordinatorNeedsYou() {
       <CoordinatorTaskMotion eventId={`decision:${selectedCompanyId}:${userId}:${id}`} phase={phase} createdAt={item.activityAt} className="coordinator-decision-motion"
         onSettled={() => setSettling(current => current.filter(entry => `${entry.sourceKind}:${entry.subject.id}` !== id))}>
       {receipt ? <Receipt item={receipt} onOpen={navigate} /> : <article className="coordinator-decision-card space-y-4 rounded-xl border border-border bg-card p-6">
-        <AskBanner kind={interaction ? "interaction" : decision ? "decision" : stalledReview ? "stalled" : "review"} from={item.originAgentName} since={item.activityAt} />
+        <AskBanner sourceKind={item.sourceKind} kind={interaction ? "interaction" : decision ? "decision" : stalledReview ? "stalled" : "review"} from={item.originAgentName} since={item.activityAt} />
         {interaction ? <AttentionInteractionResolver footerSlot={taskLink} presentation="coordinator-decision" companyId={selectedCompanyId} issueId={issueId} interactionId={item.subject.id} agentMap={agentMap} currentUserId={userId} onResolved={resolved => {
           if (!resolved || resolved.status === "pending") { void feed.refetch(); void recent.refetch(); return; }
           onResolved(item);
