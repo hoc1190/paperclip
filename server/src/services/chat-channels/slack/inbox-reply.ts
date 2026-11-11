@@ -86,6 +86,11 @@ export function matchInboxReply(text: string, options: ReplyOption[]): ReplyMatc
     return picked ? { kind: "match", option: picked } : none;
   }
 
+  const exact = options.filter(option => normalizeReply(option.label) === reply);
+  if (exact.length === 1) return { kind: "match", option: exact[0]! };
+  // Mixed signals ("ok nhưng không") must never resolve anything.
+  if (hasAny(reply, AFFIRM) && hasAny(reply, NEGATE)) return none;
+
   const byLabel = options.filter(option => {
     const label = normalizeReply(option.label);
     return label.length > 0 && (label === reply || hasPhrase(reply, label) || hasPhrase(label, reply) && reply.split(" ").length > 1);
