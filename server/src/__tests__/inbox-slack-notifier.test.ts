@@ -7,8 +7,9 @@ import {
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { inboxNotifyView, inboxSlackNotifier, type InboxItemSource } from "../services/inbox-slack-notifier.js";
+import { matchInboxReply, parseSlackThreadReply } from "../services/chat-channels/slack/inbox-reply.js";
 import { formatInboxNotification, parseSlackBlockActions, waitingLabel, type SlackInboxTransport } from "../services/chat-channels/slack/inbox-notify.js";
-import { handleInboxClick, type InboxActionApi, type InboxRequest } from "../services/inbox-slack-actions.js";
+import { handleInboxClick, handleInboxThreadReply, type InboxActionApi, type InboxRequest } from "../services/inbox-slack-actions.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDatabase = support.supported ? describe : describe.skip;
@@ -34,6 +35,34 @@ describe("inbox Slack formatting", () => {
   it("omits the link without a base URL", () => {
     expect(JSON.stringify(formatInboxNotification(inboxNotifyView(item("a")), 0, null).blocks)).not.toContain("Mở Inbox");
     expect(waitingLabel(new Date(0).toISOString(), 30 * 60_000)).toBe("30 phút");
+  });
+});
+
+describe("Slack thread reply parsing and matching", () => {
+  const event = (over: Record<string, unknown> = {}) => JSON.stringify({ type: "event_callback", team_id: "T1", event_id: "E1", event: { type: "message", user: "U1", channel: "D1", ts: "2.0", thread_ts: "1.0", text: "ok", ...over } });
+  const opts = [{ index: 1, label: "Giữ dừng", hint: null }, { index: 2, label: "Chạy tiếp", hint: null }];
+  it("accepts only plain user replies inside a thread", () => {
+    expect(parseSlackThreadReply(event(), "application/json")).toMatchObject({ userId: "U1", threadTs: "1.0", ts: "2.0" });
+    expect(parseSlackThreadReply(event({ thread_ts: "2.0" }), "application/json")).toBeNull();
+    expect(parseSlackThreadReply(event({ bot_id: "B1" }), "application/json")).toBeNull();
+    expect(parseSlackThreadReply(event({ subtype: "message_changed" }), "application/json")).toBeNull();
+    expect(parseSlackThreadReply(event(), "application/x-www-form-urlencoded")).toBeNull();
+  });
+  it("matches by number, label (diacritics-insensitive) and yes/no synonyms", () => {
+    expect(matchInboxReply("2", opts)).toMatchObject({ kind: "match", option: { index: 2 } });
+    expect(matchInboxReply("chay tiep", opts)).toMatchObject({ kind: "match", option: { index: 2 } });
+    expect(matchInboxReply("Giữ dừng nhé", opts)).toMatchObject({ kind: "match", option: { index: 1 } });
+    const yesNo = [{ index: 1, label: "Duyệt", hint: "accept" as const }, { index: 2, label: "Từ chối", hint: "reject" as const }];
+    expect(matchInboxReply("ok", yesNo)).toMatchObject({ kind: "match", option: { index: 1 } });
+    expect(matchInboxReply("không", yesNo)).toMatchObject({ kind: "match", option: { index: 2 } });
+  });
+  it("never guesses: ambiguous, questions, long text and unknown numbers are no match", () => {
+    expect(matchInboxReply("ok", [{ index: 1, label: "Chạy tiếp", hint: null }, { index: 2, label: "Duyệt", hint: null }])).toEqual({ kind: "none" });
+    expect(matchInboxReply("ok", [{ index: 1, label: "Phương án A", hint: null }, { index: 2, label: "Phương án B", hint: null }])).toEqual({ kind: "none" });
+    expect(matchInboxReply("5", opts)).toEqual({ kind: "none" });
+    expect(matchInboxReply("chạy tiếp được không?", opts)).toEqual({ kind: "none" });
+    expect(matchInboxReply("x ".repeat(50), opts)).toEqual({ kind: "none" });
+    expect(matchInboxReply("ok nhưng không", [{ index: 1, label: "Có", hint: null }, { index: 2, label: "Không", hint: null }])).toEqual({ kind: "none" });
   });
 });
 
@@ -298,6 +327,71 @@ describeDatabase("inbox Slack notifier", () => {
       await make({ api: null }).runOnce();
       expect(buttonsOf(posts[0]!).map((button: any) => button.text.text)).toEqual(["Mở HOC-17", "Mở Inbox"]);
       expect(await db.select().from(chatActions).where(eq(chatActions.kind, "inbox_action"))).toHaveLength(0);
+    });
+
+
+    describe("thread replies", () => {
+      const threadReply = (text: string, over: Partial<{ userId: string; ts: string; threadTs: string }> = {}) => ({
+        teamId: "T1", userId: "U777", channel: "D123", ts: `r-${Math.random()}`, threadTs: "ts-1", text, eventId: null, ...over,
+      });
+      const send = async (text: string, over = {}, deps = clickDeps()) => handleInboxThreadReply(db, deps, await endpointRow(), threadReply(text, over));
+
+      it("resolves the item for an exact label and records the choice", async () => {
+        await setup();
+        expect(await send("chạy tiếp")).toBe(true);
+        expect(requests).toEqual([{ method: "POST", path: "/issues/issue-1/interactions/qa/respond", body: { answers: [{ questionId: "q1", optionIds: ["o2"] }] } }]);
+        expect(posts.at(-1)!.text).toContain("Đã ghi");
+        expect(updates.at(-1)!.text).toContain("Chạy tiếp");
+      });
+      it("resolves by option number", async () => {
+        await setup();
+        await send("1");
+        expect(requests[0]!.body).toMatchObject({ answers: [{ optionIds: ["o1"] }] });
+      });
+      it("on an unclear reply writes nothing and re-offers the buttons", async () => {
+        await setup();
+        const before = posts.length;
+        expect(await send("để mình nghĩ thêm")).toBe(true);
+        expect(requests).toHaveLength(0);
+        expect(posts.length).toBe(before + 1);
+        expect(buttonsOf(posts.at(-1)!).length).toBeGreaterThan(0);
+        expect(posts.at(-1)!.threadTs).toBe("ts-1");
+      });
+      it("never executes a destructive match from text; asks for the confirm button", async () => {
+        await make({ api: api([]) }).runOnce();
+        pending = [item("b1", { sourceKind: "blocker_attention", subject: { kind: "issue", id: "issue-9", title: "Kẹt", identifier: "HOC-49" } as InboxItemSource["subject"] })];
+        await make({ api: api([]) }).runOnce();
+        requests = [];
+        await send("huỷ", {}, clickDeps({ api: api([]) }));
+        expect(requests).toHaveLength(0);
+        expect(posts.at(-1)!.text).toContain("nút");
+      });
+      it("ignores a reply from an unlinked Slack user and does not resolve", async () => {
+        await setup();
+        expect(await send("1", { userId: "UOTHER" })).toBe(true);
+        expect(requests).toHaveLength(0);
+      });
+      it("treats a reply to an already-resolved item as stale", async () => {
+        await setup();
+        pending = [];
+        await send("1");
+        expect(requests).toHaveLength(0);
+      });
+      it("processes a redelivered event once", async () => {
+        await setup();
+        const reply = threadReply("1");
+        const endpoint = await endpointRow();
+        await handleInboxThreadReply(db, clickDeps(), endpoint, reply);
+        await handleInboxThreadReply(db, clickDeps(), endpoint, reply);
+        expect(requests).toHaveLength(1);
+      });
+      it("leaves unknown threads and link-only messages to the normal pipeline", async () => {
+        await setup();
+        expect(await send("1", { threadTs: "ts-999" })).toBe(false);
+        await db.delete(chatActions).where(eq(chatActions.kind, "inbox_action"));
+        expect(await send("1")).toBe(false);
+        expect(requests).toHaveLength(0);
+      });
     });
 
     it("parses only block_actions form payloads", () => {

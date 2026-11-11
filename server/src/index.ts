@@ -134,7 +134,7 @@ import { loadCloudBootstrapConfig, loadConfig, type Config } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { inboxSlackNotifier } from "./services/inbox-slack-notifier.js";
 import { createSlackInboxTransport } from "./services/chat-channels/slack/inbox-notify.js";
-import { createLoopbackInboxApi, handleInboxClick } from "./services/inbox-slack-actions.js";
+import { createLoopbackInboxApi, handleInboxClick, handleInboxThreadReply } from "./services/inbox-slack-actions.js";
 import { setStartupRecoveryPhase } from "./startup-recovery-state.js";
 import {
   StartupRefusalError,
@@ -1433,6 +1433,9 @@ async function startServerWithDatabaseTeardown(
       await handleInboxClick(db, { transport: inboxTransport, token: chatChannels.slackInboxAccess.botToken, api: inboxApi, listPending: inboxListPending, log: logger }, endpoint, click);
     });
     server.on("close", () => chatChannels.slackInboxAccess.setClickHandler(null));
+    chatChannels.slackInboxAccess.setReplyHandler((endpoint, reply) =>
+      handleInboxThreadReply(db, { transport: inboxTransport, token: chatChannels.slackInboxAccess.botToken, api: inboxApi, listPending: inboxListPending, log: logger }, endpoint, reply));
+    server.on("close", () => chatChannels.slackInboxAccess.setReplyHandler(null));
     const inboxSlack = inboxSlackNotifier(db, {
       transport: inboxTransport,
       api: inboxApi,

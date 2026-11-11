@@ -17,6 +17,8 @@ export type SlackUpdateArgs = { token: string; channel: string; ts: string; text
 export type SlackInboxTransport = {
   post(args: SlackPostArgs): Promise<{ channel: string; ts: string }>;
   update(args: SlackUpdateArgs): Promise<void>;
+  /** Private message to one user (chat.postEphemeral); callers fall back to a thread reply when absent. */
+  ephemeral?(args: { token: string; channel: string; user: string; text: string; threadTs?: string }): Promise<void>;
 };
 
 const clip = (value: string, max: number) => (value.length <= max ? value : `${value.slice(0, max - 1).trimEnd()}…`);
@@ -97,6 +99,11 @@ export function formatInboxStillPending(title: string, choice?: string | null) {
   return { text, blocks: [section(`⚠️ ${escapeMrkdwn(clip(title, 200))} — đã thực hiện${choice ? ` _${escapeMrkdwn(clip(choice, 100))}_` : ""}, nhưng *việc vẫn đang chờ trong Inbox*. Hãy mở Inbox để hoàn tất.`)] };
 }
 
+/** A short reply posted in an Inbox message's thread; optional blocks (e.g. buttons) follow the text. */
+export function inboxThreadNotice(text: string, extraBlocks: unknown[] = []) {
+  return { text, blocks: [section(escapeMrkdwn(clip(text, 600))), ...extraBlocks] };
+}
+
 export function formatInboxReminder(view: InboxNotifyView, now: number, inboxUrl: string | null) {
   const text = `Nhắc lại: vẫn đang chờ bạn (${waitingLabel(view.since, now)}) — ${clip(view.title, 200)}`;
   return { text, blocks: [section(`⏰ Vẫn đang chờ bạn ${waitingLabel(view.since, now)}. ${inboxLink(inboxUrl) ?? ""}`.trim())] };
@@ -131,6 +138,9 @@ export function createSlackInboxTransport(fetchImpl: typeof fetch = fetch): Slac
     },
     async update({ token, channel, ts, text, blocks }) {
       await api("chat.update", { channel, ts, text, blocks: JSON.stringify(blocks) }, token);
+    },
+    async ephemeral({ token, channel, user, text, threadTs }) {
+      await api("chat.postEphemeral", { channel, user, text, ...(threadTs ? { thread_ts: threadTs } : {}) }, token);
     },
   };
 }
