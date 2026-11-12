@@ -156,6 +156,8 @@ import type { DecisionServiceOptions } from "./services/decisions.js";
 import { userProfileRoutes } from "./routes/user-profiles.js";
 import { sidebarBadgeRoutes } from "./routes/sidebar-badges.js";
 import { sidebarPreferenceRoutes } from "./routes/sidebar-preferences.js";
+import { webPushRoutes } from "./routes/web-push.js";
+import { webPushSubscriptionService } from "./services/web-push-subscriptions.js";
 import { announcementRoutes } from "./routes/announcements.js";
 import { serverVersion } from "./version.js";
 import { workspacePreferenceRoutes } from "./routes/workspace-preferences.js";
@@ -861,6 +863,10 @@ export async function createApp(
   api.use(userProfileRoutes(db));
   api.use(sidebarBadgeRoutes(db));
   api.use(sidebarPreferenceRoutes(db));
+  // index.ts wires the notifier (it needs the delivery coordinator) and fills webPushReconcile.
+  const webPushSubscriptions = webPushSubscriptionService(db);
+  app.locals.webPushSubscriptions = webPushSubscriptions;
+  api.use(webPushRoutes(db, { subscriptions: webPushSubscriptions, reconcile: () => app.locals.webPushReconcile, isWarmStandby }));
   api.use(announcementRoutes(db, { ...opts.announcements, version: opts.hostVersion ?? serverVersion }));
   api.use(resourceMembershipRoutes(db));
   api.use(primaryAgentRoutes(db));

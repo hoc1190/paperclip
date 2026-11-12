@@ -608,6 +608,10 @@ export const queryKeys = {
   auth: {
     session: ["auth", "session"] as const,
   },
+  webPush: {
+    config: ["web-push", "config"] as const,
+    mine: ["web-push", "subscriptions", "me"] as const,
+  },
   inboxAgentPolicy: {
     mine: (companyId: string) =>
       ["inbox-agent-policy", companyId, "me"] as const,
