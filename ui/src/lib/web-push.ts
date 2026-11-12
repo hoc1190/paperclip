@@ -10,7 +10,7 @@ function isIos(): boolean {
   return /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
 }
 
-function isStandalone(): boolean {
+export function isStandalone(): boolean {
   if ((navigator as Navigator & { standalone?: boolean }).standalone === true) return true;
   return typeof window.matchMedia === "function" && window.matchMedia("(display-mode: standalone)").matches;
 }
