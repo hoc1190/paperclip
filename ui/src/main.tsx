@@ -27,6 +27,8 @@ import { startChunkLoadRecovery } from "./lib/chunk-load-recovery";
 import { startPerfMeasureReaper } from "./lib/perf-measure-reaper";
 import { getOrCreatePaperclipReactRoot } from "./lib/react-root";
 import { startServiceWorkerUpdates } from "./lib/service-worker-updates";
+import { syncPushSubscription } from "./lib/web-push";
+import { ServiceWorkerNavigationBridge } from "./components/ServiceWorkerNavigationBridge";
 import { connectivity } from "./lib/connectivity";
 import { bindConnectivity, createAppQueryClient } from "./lib/query-client";
 import { captureBrowserException } from "./lib/sentry";
@@ -97,6 +99,7 @@ window.addEventListener("load", () => {
       return () => { for (const cleanup of cleanups) cleanup(); };
     },
   });
+  void syncPushSubscription();
 });
 
 function CompanyAwareBreadcrumbProvider({ children }: { children: React.ReactNode }) {
@@ -124,6 +127,7 @@ getOrCreatePaperclipReactRoot(window, rootElement).render(
               <EditorAutocompleteProvider>
                 <ToastProvider>
                   <MutationErrorToastBridge />
+                  <ServiceWorkerNavigationBridge />
                   <PrimaryAgentProvider>
                   <LiveUpdatesProvider>
                     <TooltipProvider>
