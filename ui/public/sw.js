@@ -174,11 +174,13 @@ self.addEventListener("push", (event) => {
   const valid = payload && typeof payload === "object" && typeof payload.title === "string";
   // Always show a notification: iOS revokes subscriptions after silent pushes.
   const title = valid ? payload.title : "Paperclip";
+  const tag = valid && typeof payload.tag === "string" && payload.tag ? payload.tag : undefined;
   const options = valid
     ? {
         body: typeof payload.body === "string" ? payload.body : "",
-        tag: typeof payload.tag === "string" ? payload.tag : undefined,
-        renotify: false,
+        tag,
+        // Browsers throw on renotify without a tag.
+        renotify: tag !== undefined && payload.renotify === true,
         icon: "/android-chrome-192x192.png",
         badge: "/android-chrome-192x192.png",
         data: { url: payload.url, companyId: payload.companyId, itemId: payload.itemId },

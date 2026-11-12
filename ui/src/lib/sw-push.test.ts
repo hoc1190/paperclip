@@ -56,6 +56,19 @@ describe("sw.js web push", () => {
     });
   });
 
+  it("renotifies only when the payload asks and a tag is present", async () => {
+    const { listeners, showNotification } = loadWorker();
+    await dispatch(listeners.get("push"), { data: { json: () => ({ ...payload, renotify: true }) } });
+    expect(showNotification.mock.calls[0]?.[1]).toMatchObject({ tag: payload.tag, renotify: true });
+  });
+
+  it("never sets renotify without a tag", async () => {
+    const { listeners, showNotification } = loadWorker();
+    const { tag: _tag, ...noTag } = payload;
+    await dispatch(listeners.get("push"), { data: { json: () => ({ ...noTag, renotify: true }) } });
+    expect(showNotification.mock.calls[0]?.[1]).toMatchObject({ renotify: false, tag: undefined });
+  });
+
   it("still shows a notification for a malformed payload", async () => {
     const { listeners, showNotification } = loadWorker();
     await dispatch(listeners.get("push"), {
