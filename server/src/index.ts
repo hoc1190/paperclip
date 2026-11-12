@@ -133,6 +133,9 @@ import { initializeCloudRuntimeConfig } from "./services/cloud-runtime-config.js
 import { loadCloudBootstrapConfig, loadConfig, type Config } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { inboxSlackNotifier } from "./services/inbox-slack-notifier.js";
+import { inboxWebPushNotifier } from "./services/inbox-web-push-notifier.js";
+import { resolveWebPushVapid } from "./services/web-push-vapid.js";
+import type { WebPushSubscriptionService } from "./services/web-push-subscriptions.js";
 import { createSlackInboxTransport } from "./services/chat-channels/slack/inbox-notify.js";
 import { createLoopbackInboxApi, handleInboxClick, handleInboxThreadReply } from "./services/inbox-slack-actions.js";
 import { setStartupRecoveryPhase } from "./startup-recovery-state.js";
@@ -1419,16 +1422,16 @@ async function startServerWithDatabaseTeardown(
   server.on("close", () => { void budgetEnforcementWorker.stop(); });
   const accountingWorker = registerCostAccountingWork(db, deliveryWork, accountingHeartbeat.reconcileCostAccounting);
   server.on("close", accountingWorker.stop);
+  const inboxAttention = attentionService(db);
+  const inboxListPending = async (companyId: string, userId: string) => (await inboxAttention.list(companyId, { userId, all: true, allowUnscopedAll: true })).items;
   if (process.env.PAPERCLIP_INBOX_SLACK_NOTIFY !== "false" && !isWarmStandby()) {
     // Mirrors pending board Inbox items to Slack (see services/inbox-slack-notifier.ts).
     const chatChannels = app.locals.chatChannels as ReturnType<typeof import("./services/chat-channels.js").chatChannelService>;
-    const inboxAttention = attentionService(db);
     const reminderMinutes = Number(process.env.PAPERCLIP_INBOX_SLACK_REMINDER_MINUTES ?? "240");
     // Buttons execute through the server's own API, which treats every local request as the board only in
     // local_trusted mode; other modes keep link buttons until a scoped service credential exists.
     const inboxApi = config.deploymentMode === "local_trusted" ? createLoopbackInboxApi(`http://127.0.0.1:${listenPort}`) : null;
     const inboxTransport = createSlackInboxTransport();
-    const inboxListPending = async (companyId: string, userId: string) => (await inboxAttention.list(companyId, { userId, all: true, allowUnscopedAll: true })).items;
     chatChannels.slackInboxAccess.setClickHandler(async (endpoint, click) => {
       await handleInboxClick(db, { transport: inboxTransport, token: chatChannels.slackInboxAccess.botToken, api: inboxApi, listPending: inboxListPending, log: logger }, endpoint, click);
     });
@@ -1448,6 +1451,20 @@ async function startServerWithDatabaseTeardown(
       log: logger,
     }).start();
     server.on("close", inboxSlack.stop);
+  }
+  const webPushVapid = process.env.PAPERCLIP_WEB_PUSH !== "false" && !isWarmStandby() ? resolveWebPushVapid() : null;
+  if (webPushVapid) {
+    // Pushes new Inbox items to subscribed devices; event driven, independent of Slack (see services/inbox-web-push-notifier.ts).
+    const inboxWebPush = inboxWebPushNotifier(db, deliveryWork, {
+      listPending: inboxListPending,
+      vapid: webPushVapid,
+      subscriptions: app.locals.webPushSubscriptions as WebPushSubscriptionService,
+      isWarmStandby,
+      log: logger,
+    });
+    app.locals.webPushReconcile = inboxWebPush.requestReconcile;
+    server.on("close", () => { app.locals.webPushReconcile = undefined; void inboxWebPush.stop(); });
+    void inboxWebPush.start().catch(error => logger.warn({ error: String(error) }, "Inbox web push startup pass failed"));
   }
   skillSourceSync.start(deliveryWork);
   idleDeadlineOwners.skills = bindIdleDeadlineOwner(skillSourceSync.reconciliationSnapshot, readIdleSkillSourceSchedule,

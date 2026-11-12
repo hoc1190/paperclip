@@ -39,6 +39,7 @@ export const DELIVERY_QUEUES = {
   importSpoolCleanup: "import-spool-cleanup",
   externalConversationSettlement: "external-conversation-settlement",
   nativeRecoveryNotices: "native-recovery-notices",
+  webPushInbox: "web-push-inbox",
   nativeEnvironmentSettlement: "native-environment-settlement",
   nativeRunProjection: "native-run-projection",
   nativeResultCommit: "native-result-commit",
