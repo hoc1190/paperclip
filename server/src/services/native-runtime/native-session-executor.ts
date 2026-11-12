@@ -3180,8 +3180,18 @@ function failedStartupRetired(attempt: unknown): boolean {
 
 /** The session's state root, or, when only the fence's quarantine holds it,
  * that one `identity_indeterminate` copy. Several copies are ambiguous. */
-function quarantinedOwnerStateRoot(scoped: string): string {
-  if (existsSync(scoped)) return scoped;
+export function quarantinedOwnerStateRoot(scoped: string): string {
+  if (existsSync(scoped)) {
+    if (existsSync(resolve(scoped, "control-plane", "control-plane-state.json"))) return scoped;
+    // A restart or successor launch may already have retired the saved state
+    // into continuity-breaks. When exactly one archive holds it, that copy is
+    // the owner's state; several are ambiguous and stay unproven.
+    const archives = resolve(scoped, "continuity-breaks");
+    if (!isSafeNativeStateDirectory(archives)) return scoped;
+    const kept = readdirSync(archives).map(name => resolve(archives, name))
+      .filter(dir => existsSync(resolve(dir, "control-plane", "control-plane-state.json")));
+    return kept.length === 1 && isSafeNativeStateDirectory(kept[0]!) ? kept[0]! : scoped;
+  }
   const quarantine = resolve(runnerdStateBase(), "quarantine");
   if (!isSafeNativeStateDirectory(quarantine)) return scoped;
   const copies = readdirSync(quarantine).filter(name => name.startsWith(`${basename(scoped)}.identity_indeterminate.`));
@@ -3281,7 +3291,7 @@ export async function verifyStoppedNativeSessionForContinuation(
     if (!RUNNERD_CONTROL_PLANE_STATE_SCHEMAS.has(String(snapshot.control.schema)) ||
         snapshot.runner.schema !== RUNNERD_STATE_SCHEMA ||
         snapshot.provider.schema !== (execution.provider.kind === "codex" ? "paperclip.runner.codex-provider-state.v1" : ACPX_PROVIDER_STATE_SCHEMA) ||
-        !["turn_active", "prepared", "suspended", "session_open"].includes(String(snapshot.provider.lifecycle)) ||
+        !["turn_active", "prepared", "suspended", "session_open", "closed"].includes(String(snapshot.provider.lifecycle)) ||
         !failedStartupRetired(snapshot.provider.startupAttempt)) return null;
     const pending = JSON.stringify([snapshot.runner.outbox, snapshot.provider.pendingEvents, snapshot.provider.queuedEvents]);
     if (/session\.(started|resumed|reconciled)/.test(pending)) return null;
