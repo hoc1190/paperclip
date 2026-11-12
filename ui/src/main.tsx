@@ -29,6 +29,7 @@ import { getOrCreatePaperclipReactRoot } from "./lib/react-root";
 import { startServiceWorkerUpdates } from "./lib/service-worker-updates";
 import { syncPushSubscription } from "./lib/web-push";
 import { ServiceWorkerNavigationBridge } from "./components/ServiceWorkerNavigationBridge";
+import { PushPermissionPrompt } from "./components/PushPermissionPrompt";
 import { connectivity } from "./lib/connectivity";
 import { bindConnectivity, createAppQueryClient } from "./lib/query-client";
 import { captureBrowserException } from "./lib/sentry";
@@ -128,6 +129,7 @@ getOrCreatePaperclipReactRoot(window, rootElement).render(
                 <ToastProvider>
                   <MutationErrorToastBridge />
                   <ServiceWorkerNavigationBridge />
+                  <PushPermissionPrompt />
                   <PrimaryAgentProvider>
                   <LiveUpdatesProvider>
                     <TooltipProvider>
