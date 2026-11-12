@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { DecisionBundleHeader, decisionHistoryCount, decisionHistoryQueryEnabled } from "./WhatNeedsMe";
+import type { AttentionItem } from "@paperclipai/shared";
+import { DecisionBundleHeader, decisionHistoryCount, decisionHistoryQueryEnabled, findDeepLinkTarget } from "./WhatNeedsMe";
 
 describe("WhatNeedsMe decision history", () => {
   it("defers terminal-history queries until their curtain opens", () => {
@@ -28,5 +29,25 @@ describe("WhatNeedsMe decision history", () => {
     expect(multiple).toContain("Planner proposed 2 decisions");
     expect(single).not.toContain("cleanup");
     expect(multiple).not.toContain("cleanup");
+  });
+});
+
+describe("WhatNeedsMe deep link target", () => {
+  const items = [
+    { id: "attn:a", sourceKind: "approval", subject: { id: "s1" } },
+    { id: "attn:b", sourceKind: "decision", subject: { id: "d1" } },
+  ] as unknown as AttentionItem[];
+
+  it("matches ?item= by attention item id", () => {
+    expect(findDeepLinkTarget(items, "attn:a", null)?.id).toBe("attn:a");
+  });
+
+  it("returns undefined for an unknown ?item=", () => {
+    expect(findDeepLinkTarget(items, "attn:gone", null)).toBeUndefined();
+  });
+
+  it("keeps ?decisionId= matching decision subjects", () => {
+    expect(findDeepLinkTarget(items, null, "d1")?.id).toBe("attn:b");
+    expect(findDeepLinkTarget(items, null, "s1")).toBeUndefined();
   });
 });

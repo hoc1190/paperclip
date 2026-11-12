@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useCoordinatorWorkspaceEnabled } from "../hooks/useCoordinatorWorkspaceEnabled";
 import { CoordinatorNeedsYou } from "../components/coordinator/CoordinatorNeedsYou";
 import { CheckCircle2, Inbox } from "lucide-react";
-import type { Agent, AttentionItem, AttentionSubject } from "@paperclipai/shared";
+import { INBOX_ITEM_DEEP_LINK_PARAM, type Agent, type AttentionItem, type AttentionSubject } from "@paperclipai/shared";
 import { useNavigate, useSearchParams } from "@/lib/router";
 import { attentionApi } from "../api/attention";
 import { agentsApi } from "../api/agents";
@@ -69,6 +69,19 @@ export function decisionHistoryQueryEnabled(companyId: string | null | undefined
   return Boolean(companyId && open);
 }
 
+/** Resolve `?item=<attentionItemId>` or the legacy `?decisionId=` to a feed item. */
+export function findDeepLinkTarget(
+  items: AttentionItem[],
+  itemParam: string | null,
+  decisionId: string | null,
+): AttentionItem | undefined {
+  if (itemParam) return items.find((item) => item.id === itemParam);
+  if (decisionId) {
+    return items.find((item) => item.sourceKind === "decision" && item.subject.id === decisionId);
+  }
+  return undefined;
+}
+
 export function decisionHistoryCount(count: number | undefined) {
   if (count == null) return undefined;
   return count > DECISION_HISTORY_VISIBLE_LIMIT ? `${DECISION_HISTORY_VISIBLE_LIMIT}+` : count;
@@ -126,6 +139,7 @@ function ClassicWhatNeedsMe() {
   // `?decisionId=` deep link (PAP-16032 §4.7) — focus/expand the referenced card.
   const [searchParams, setSearchParams] = useSearchParams();
   const deepLinkDecisionId = searchParams.get("decisionId");
+  const deepLinkItemId = searchParams.get(INBOX_ITEM_DEEP_LINK_PARAM);
   const [deepLinkConsumed, setDeepLinkConsumed] = useState(false);
 
   // Optimistic hide/restore. Reset whenever a fresh feed lands (server truth).
@@ -365,26 +379,36 @@ function ClassicWhatNeedsMe() {
   // card once the feed lands, then drop the param so a later manual collapse is
   // not re-forced on the next refetch. Wins over the generic auto-expand below.
   useEffect(() => {
-    if (deepLinkConsumed || !deepLinkDecisionId || allItems.length === 0) return;
-    const target = allItems.find(
-      (item) => item.sourceKind === "decision" && item.subject.id === deepLinkDecisionId,
-    );
+    if (deepLinkConsumed || (!deepLinkDecisionId && !deepLinkItemId)) return;
+    // `?item=` must also resolve against an empty feed (item already gone), so
+    // wait for the feed to load rather than for items to exist.
+    if (!feed) return;
+    const target = findDeepLinkTarget(allItems, deepLinkItemId, deepLinkDecisionId);
     setDeepLinkConsumed(true);
     setAutoExpandDone(true);
     if (target) {
       setExpandedId(target.id);
       setSelectedAttentionId(target.id);
       setSelectionFromKeyboard(true);
+    } else if (deepLinkItemId) {
+      pushToast({
+        dedupeKey: "inbox-deep-link-missing",
+        title: "This item is no longer waiting for you",
+        tone: "info",
+      });
+    }
+    if (target || deepLinkItemId) {
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
           next.delete("decisionId");
+          next.delete(INBOX_ITEM_DEEP_LINK_PARAM);
           return next;
         },
         { replace: true },
       );
     }
-  }, [allItems, deepLinkConsumed, deepLinkDecisionId, setSearchParams]);
+  }, [allItems, feed, deepLinkConsumed, deepLinkDecisionId, deepLinkItemId, pushToast, setSearchParams]);
 
   // Auto-expand the topmost inline-capable decision, once.
   useEffect(() => {
