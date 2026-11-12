@@ -4188,6 +4188,23 @@ pnpm secrets:migrate-inline-env         # dry run
 pnpm secrets:migrate-inline-env --apply # apply migration
 ```
 
+## Web Push for Inbox items
+
+Paperclip pushes new board Inbox items to devices that turned on notifications in
+Profile settings. The VAPID key pair is derived from the same instance master key
+described in "Secrets in Dev" unless overridden, so back that key up as above.
+Rotating or losing it invalidates every push subscription; devices re-subscribe
+on next open.
+
+- `PAPERCLIP_WEB_PUSH=false` disables the feature.
+- `PAPERCLIP_WEB_PUSH_SUBJECT` sets the VAPID subject (`https://` URL or
+  `mailto:`; defaults to `https://paperclip.vibehonban.jp`).
+- `PAPERCLIP_WEB_PUSH_VAPID_PUBLIC_KEY` and `PAPERCLIP_WEB_PUSH_VAPID_PRIVATE_KEY`
+  override the derived key pair.
+
+See `doc/WEB-PUSH.md` for setup on iOS and Android, behavior, the endpoint
+allowlist, API routes and known limits.
+
 ## Internal Connection Token Brokers
 
 Paperclip Cloud connector identities support `development`, `test`, `staging`,
