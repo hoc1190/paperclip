@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   INBOX_ITEM_DEEP_LINK_PARAM,
   inboxItemDeepLink,
+  canonicalWebPushEndpoint,
   webPushSubscribeSchema,
   webPushUnsubscribeSchema,
 } from "./index.js";
@@ -47,6 +48,33 @@ describe("web push validators", () => {
     expect(webPushSubscribeSchema.safeParse({ endpoint, keys: { ...validKeys, auth: "bad+key/==" } }).success).toBe(false);
     expect(webPushSubscribeSchema.safeParse({ endpoint, keys: { ...validKeys, p256dh: "short" } }).success).toBe(false);
     expect(webPushSubscribeSchema.safeParse({ endpoint, keys: validKeys, userAgent: "x".repeat(301) }).success).toBe(false);
+  });
+
+  it("requires exact key shapes", () => {
+    const endpoint = "https://fcm.googleapis.com/x";
+    const parse = (keys: object) => webPushSubscribeSchema.safeParse({ endpoint, keys }).success;
+    expect(parse(validKeys)).toBe(true);
+    expect(parse({ ...validKeys, p256dh: "B".repeat(86) })).toBe(false);
+    expect(parse({ ...validKeys, p256dh: "B".repeat(88) })).toBe(false);
+    expect(parse({ ...validKeys, p256dh: "A".repeat(87) })).toBe(false); // does not start with 0x04
+    expect(parse({ ...validKeys, auth: "a".repeat(21) })).toBe(false);
+    expect(parse({ ...validKeys, auth: "a".repeat(23) })).toBe(false);
+  });
+
+  it.each([
+    "https://evil.com;.googleapis.com/x",
+    "https://evil.com'.googleapis.com/x",
+    'https://evil.com".googleapis.com/x',
+    "https://evil.com{.googleapis.com/x",
+    "https://evil.com`.googleapis.com/x",
+    "https://user:pw@fcm.googleapis.com/x",
+    "https://fcm.googleapis.com:443/x",
+    "https://FCM.googleapis.com/x",
+    "https://fcm.googleapis.com/x#frag",
+    "https://fcm.googleapis.com",
+  ])("rejects a non-canonical endpoint %s", endpoint => {
+    expect(canonicalWebPushEndpoint(endpoint)).toBeNull();
+    expect(webPushSubscribeSchema.safeParse({ endpoint, keys: validKeys }).success).toBe(false);
   });
 
   it("validates unsubscribe payloads", () => {

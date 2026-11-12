@@ -18,6 +18,8 @@ export interface WebPushInboxPayload {
   tag: string;
   companyId: string;
   itemId: string;
+  /** Set for summary notifications so a replaced tag still alerts. */
+  renotify?: boolean;
 }
 
 export const INBOX_ITEM_DEEP_LINK_PARAM = "item";

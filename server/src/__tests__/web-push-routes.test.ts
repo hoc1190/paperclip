@@ -10,11 +10,11 @@ const subscriptions = vi.hoisted(() => ({
 const reconcile = vi.hoisted(() => vi.fn());
 
 const vapid = { publicKey: "BPublicKey", privateKey: "priv", keyId: "key-1", subject: "https://paperclip.test" };
-const keys = { p256dh: "p".repeat(87), auth: "a".repeat(22) };
+const keys = { p256dh: "B".repeat(87), auth: "a".repeat(22) };
 const goodEndpoint = "https://fcm.googleapis.com/fcm/send/abc";
 const boardActor = { type: "board", userId: "local-board", source: "local_implicit", isInstanceAdmin: true };
 
-async function createApp(actor: Record<string, unknown>, options: { vapid?: typeof vapid | null; enabled?: boolean; withReconcile?: boolean } = {}) {
+async function createApp(actor: Record<string, unknown>, options: { vapid?: typeof vapid | null; enabled?: boolean; withReconcile?: boolean; standby?: boolean } = {}) {
   const { errorHandler } = await import("../middleware/index.js");
   const { webPushRoutes } = await import("../routes/web-push.js");
   const app = express();
@@ -25,6 +25,7 @@ async function createApp(actor: Record<string, unknown>, options: { vapid?: type
     reconcile: () => (options.withReconcile === false ? undefined : reconcile),
     getVapid: () => (options.vapid === undefined ? vapid : options.vapid),
     isEnabled: () => options.enabled ?? true,
+    isWarmStandby: () => options.standby ?? false,
   }));
   app.use(errorHandler);
   return app;
@@ -70,7 +71,8 @@ describe("web push routes", () => {
   it.each([
     "https://evil.example/push",
     "https://127.0.0.1/push",
-    "https://fcm.googleapis.com:8443/push",
+    "https://push.apple.com/push",
+    "https://other.googleapis.com/push",
   ])("rejects a disallowed endpoint %s", async endpoint => {
     const res = await request(await createApp(boardActor)).put("/api/web-push/subscriptions/me").send({ endpoint, keys });
     expect(res.status).toBe(422);
@@ -81,6 +83,35 @@ describe("web push routes", () => {
     const app = await createApp(boardActor);
     expect((await request(app).put("/api/web-push/subscriptions/me").send({ endpoint: "http://fcm.googleapis.com/x", keys })).status).toBe(400);
     expect((await request(app).put("/api/web-push/subscriptions/me").send({ endpoint: goodEndpoint, keys: { p256dh: "x", auth: "y" } })).status).toBe(400);
+    expect(subscriptions.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://evil.com;.googleapis.com/x",
+    "https://evil.com'.googleapis.com/x",
+    "https://fcm.googleapis.com:8443/push",
+  ])("rejects a parser-confusing endpoint %s before it reaches the service", async endpoint => {
+    const res = await request(await createApp(boardActor)).put("/api/web-push/subscriptions/me").send({ endpoint, keys });
+    expect(res.status).toBe(400);
+    expect(subscriptions.upsert).not.toHaveBeenCalled();
+  });
+
+  it("answers 409 when the endpoint belongs to another user", async () => {
+    const { conflict } = await import("../errors.js");
+    subscriptions.upsert.mockRejectedValue(conflict("Push endpoint is registered by another user"));
+    const res = await request(await createApp(boardActor)).put("/api/web-push/subscriptions/me").send({ endpoint: goodEndpoint, keys });
+    expect(res.status).toBe(409);
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it("answers 503 on every route on a warm standby", async () => {
+    const app = await createApp(boardActor, { standby: true });
+    for (const res of [
+      await request(app).get("/api/web-push/config"),
+      await request(app).get("/api/web-push/subscriptions/me"),
+      await request(app).put("/api/web-push/subscriptions/me").send({ endpoint: goodEndpoint, keys }),
+      await request(app).post("/api/web-push/subscriptions/me/unsubscribe").send({ endpoint: goodEndpoint }),
+    ]) expect(res.status).toBe(503);
     expect(subscriptions.upsert).not.toHaveBeenCalled();
   });
 

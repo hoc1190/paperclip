@@ -22,14 +22,21 @@ export function webPushRoutes(_db: unknown, deps: {
   reconcile: () => ((input: { userId: string }) => Promise<void>) | undefined;
   getVapid?: () => WebPushVapid | null;
   isEnabled?: () => boolean;
+  isWarmStandby?: () => boolean;
 }) {
   const router = Router();
   const getVapid = deps.getVapid ?? (() => resolveWebPushVapid());
   const isEnabled = deps.isEnabled ?? (() => process.env.PAPERCLIP_WEB_PUSH !== "false");
+  const isWarmStandby = deps.isWarmStandby ?? (() => false);
+  const onStandby = (res: Response) => {
+    if (!isWarmStandby()) return false;
+    res.status(503).json({ error: "Web push is unavailable on a standby server" });
+    return true;
+  };
   const activeVapid = () => (isEnabled() ? getVapid() : null);
 
   router.get("/web-push/config", (req, res) => {
-    if (!requireBoardUserId(req, res)) return;
+    if (!requireBoardUserId(req, res) || onStandby(res)) return;
     const vapid = activeVapid();
     const config: WebPushConfig = { enabled: vapid !== null, publicKey: vapid?.publicKey ?? null };
     res.json(config);
@@ -37,13 +44,13 @@ export function webPushRoutes(_db: unknown, deps: {
 
   router.get("/web-push/subscriptions/me", async (req, res) => {
     const userId = requireBoardUserId(req, res);
-    if (!userId) return;
+    if (!userId || onStandby(res)) return;
     res.json(await deps.subscriptions.listForUser(userId));
   });
 
   router.put("/web-push/subscriptions/me", validate(webPushSubscribeSchema), async (req, res) => {
     const userId = requireBoardUserId(req, res);
-    if (!userId) return;
+    if (!userId || onStandby(res)) return;
     const vapid = activeVapid();
     if (!vapid) {
       res.status(503).json({ error: "Web push is disabled" });
@@ -62,7 +69,7 @@ export function webPushRoutes(_db: unknown, deps: {
 
   router.post("/web-push/subscriptions/me/unsubscribe", validate(webPushUnsubscribeSchema), async (req, res) => {
     const userId = requireBoardUserId(req, res);
-    if (!userId) return;
+    if (!userId || onStandby(res)) return;
     const removed = await deps.subscriptions.remove(userId, req.body.endpoint);
     if (removed) logger.info({ userId }, "web push subscription removed");
     res.status(204).end();

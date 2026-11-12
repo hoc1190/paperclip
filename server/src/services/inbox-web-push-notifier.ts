@@ -18,6 +18,8 @@ import type { WebPushSubscriptionService } from "./web-push-subscriptions.js";
 const BASELINE_KEY = "__baseline__";
 const NOTICE_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const MAX_PAYLOAD_BYTES = 3000;
+const COMPANY_RETRY_MS = 5000;
+const MAX_COMPANY_RETRIES = 5;
 const TRIGGER_EVENTS = new Set(["activity.logged", "heartbeat.run.status", "agent.status"]);
 
 type Logger = { warn: (obj: object, msg: string) => void; info?: (obj: object, msg: string) => void };
@@ -57,6 +59,7 @@ export function inboxWebPushNotifier(db: Db, deliveryWork: ReturnType<typeof cre
   const coalesceMs = deps.coalesceMs ?? 3000;
   const maxPerRun = deps.maxPerRun ?? 5;
   const dirty = new Set<string>();
+  const companyRetries = new Map<string, number>();
   let dirtyAll = false;
   let flushAt: number | null = null;
   let stopped = false;
@@ -111,7 +114,7 @@ export function inboxWebPushNotifier(db: Db, deliveryWork: ReturnType<typeof cre
         if (extra > 0) {
           await fanOut(fitWebPushPayload({
             v: 1, title: `+${extra} mục mới trong Inbox`, body: "", url: `/${company.prefix}/decisions`,
-            tag: `inbox-summary:${company.id}`, companyId: company.id, itemId: `summary:${company.id}`,
+            tag: `inbox-summary:${company.id}`, companyId: company.id, itemId: `summary:${company.id}`, renotify: true,
           }));
         }
       }
@@ -145,8 +148,21 @@ export function inboxWebPushNotifier(db: Db, deliveryWork: ReturnType<typeof cre
         ));
       for (const membership of memberships) {
         if (!all && !snapshot.has(membership.id)) continue;
-        try { await runCompany(membership.userId, membership); }
-        catch (error) { deps.log?.warn({ companyId: membership.id, error: String(error) }, "Inbox web push failed for company"); }
+        try {
+          await runCompany(membership.userId, membership);
+          companyRetries.delete(membership.id);
+        } catch (error) {
+          deps.log?.warn({ companyId: membership.id, error: String(error) }, "Inbox web push failed for company");
+          // Retry shortly instead of waiting for the next live event, but not forever.
+          const attempts = (companyRetries.get(membership.id) ?? 0) + 1;
+          if (attempts <= MAX_COMPANY_RETRIES) {
+            companyRetries.set(membership.id, attempts);
+            dirty.add(membership.id);
+            scheduleFlush(now() + COMPANY_RETRY_MS);
+          } else {
+            companyRetries.delete(membership.id);
+          }
+        }
       }
     } catch (error) {
       for (const id of snapshot) dirty.add(id);
