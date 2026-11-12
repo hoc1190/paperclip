@@ -164,3 +164,71 @@ self.addEventListener("fetch", (event) => {
       })
   );
 });
+
+// Web Push for Inbox items. Independent of BUILD_ID and the fetch handler.
+self.addEventListener("push", (event) => {
+  let payload = null;
+  try {
+    payload = event.data ? event.data.json() : null;
+  } catch { /* Fall through to the generic notification. */ }
+  const valid = payload && typeof payload === "object" && typeof payload.title === "string";
+  // Always show a notification: iOS revokes subscriptions after silent pushes.
+  const title = valid ? payload.title : "Paperclip";
+  const options = valid
+    ? {
+        body: typeof payload.body === "string" ? payload.body : "",
+        tag: typeof payload.tag === "string" ? payload.tag : undefined,
+        renotify: false,
+        icon: "/android-chrome-192x192.png",
+        badge: "/android-chrome-192x192.png",
+        data: { url: payload.url, companyId: payload.companyId, itemId: payload.itemId },
+      }
+    : {
+        body: "New Inbox item",
+        icon: "/android-chrome-192x192.png",
+        badge: "/android-chrome-192x192.png",
+        data: { url: "/" },
+      };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  let target;
+  try {
+    target = new URL(event.notification.data?.url ?? "/", self.location.origin);
+    if (target.origin !== self.location.origin) target = new URL("/", self.location.origin);
+  } catch {
+    target = new URL("/", self.location.origin);
+  }
+  event.waitUntil((async () => {
+    const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    const client = windows.find((w) => w.focused) ?? windows[0];
+    if (client) {
+      await client.focus();
+      client.postMessage({ type: "paperclip:navigate", url: target.pathname + target.search });
+      return;
+    }
+    await self.clients.openWindow(target.href);
+  })());
+});
+
+// Best effort only; the page-side startup sync is the real repair path.
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil((async () => {
+    try {
+      const key = event.oldSubscription?.options?.applicationServerKey;
+      if (!key) return;
+      const sub = await self.registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: key,
+      });
+      await fetch("/api/web-push/subscriptions/me", {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...sub.toJSON(), userAgent: self.navigator?.userAgent?.slice(0, 300) }),
+      });
+    } catch { /* Ignore failures. */ }
+  })());
+});
