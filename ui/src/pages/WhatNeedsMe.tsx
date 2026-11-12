@@ -4,7 +4,7 @@ import { useCoordinatorWorkspaceEnabled } from "../hooks/useCoordinatorWorkspace
 import { CoordinatorNeedsYou } from "../components/coordinator/CoordinatorNeedsYou";
 import { CheckCircle2, Inbox } from "lucide-react";
 import { INBOX_ITEM_DEEP_LINK_PARAM, type Agent, type AttentionItem, type AttentionSubject } from "@paperclipai/shared";
-import { useNavigate, useSearchParams } from "@/lib/router";
+import { useNavigate, useParams, useSearchParams } from "@/lib/router";
 import { attentionApi } from "../api/attention";
 import { agentsApi } from "../api/agents";
 import { authApi } from "../api/auth";
@@ -82,6 +82,35 @@ export function findDeepLinkTarget(
   return undefined;
 }
 
+export type DeepLinkResolution = "open" | "missing" | "wait";
+
+/**
+ * Decide what a deep link may do with the feed it sees. A hit may open right
+ * away, even from cached data. A miss is only believable once a fetch that
+ * finished after the link arrived has landed, and only for the route's company
+ * (the selected company can still be the previous one right after navigation).
+ */
+export function resolveDeepLink(input: {
+  hasFeed: boolean;
+  target: AttentionItem | undefined;
+  isFetching: boolean;
+  dataUpdatedAt: number;
+  linkedAt: number;
+  routeCompanyPrefix: string | null | undefined;
+  selectedCompanyPrefix: string | null | undefined;
+}): DeepLinkResolution {
+  if (!input.hasFeed) return "wait";
+  if (
+    input.routeCompanyPrefix &&
+    input.routeCompanyPrefix.toUpperCase() !== (input.selectedCompanyPrefix ?? "").toUpperCase()
+  ) {
+    return "wait";
+  }
+  if (input.target) return "open";
+  if (input.isFetching || input.dataUpdatedAt < input.linkedAt) return "wait";
+  return "missing";
+}
+
 export function decisionHistoryCount(count: number | undefined) {
   if (count == null) return undefined;
   return count > DECISION_HISTORY_VISIBLE_LIMIT ? `${DECISION_HISTORY_VISIBLE_LIMIT}+` : count;
@@ -106,7 +135,8 @@ export function WhatNeedsMe() {
 }
 
 function ClassicWhatNeedsMe() {
-  const { selectedCompanyId } = useCompany();
+  const { selectedCompanyId, selectedCompany } = useCompany();
+  const { companyPrefix: routeCompanyPrefix } = useParams<{ companyPrefix?: string }>();
   const { setBreadcrumbs } = useBreadcrumbs();
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [selectedAttentionId, setSelectedAttentionId] = useState<string | null>(null);
@@ -140,7 +170,15 @@ function ClassicWhatNeedsMe() {
   const [searchParams, setSearchParams] = useSearchParams();
   const deepLinkDecisionId = searchParams.get("decisionId");
   const deepLinkItemId = searchParams.get(INBOX_ITEM_DEEP_LINK_PARAM);
-  const [deepLinkConsumed, setDeepLinkConsumed] = useState(false);
+  // Keyed on the param values so a second notification tapped while this page
+  // is already mounted is handled too, not just the first.
+  const deepLinkKey = `${deepLinkItemId ?? ""}|${deepLinkDecisionId ?? ""}`;
+  const [consumedDeepLinkKey, setConsumedDeepLinkKey] = useState<string | null>(null);
+  const deepLinkConsumed = consumedDeepLinkKey === deepLinkKey;
+  const deepLinkSeen = useRef<{ key: string; at: number; refetched: boolean }>({ key: "", at: 0, refetched: false });
+  if (deepLinkSeen.current.key !== deepLinkKey) {
+    deepLinkSeen.current = { key: deepLinkKey, at: Date.now(), refetched: false };
+  }
 
   // Optimistic hide/restore. Reset whenever a fresh feed lands (server truth).
   const [pendingHide, setPendingHide] = useState<Set<string>>(() => new Set());
@@ -384,7 +422,28 @@ function ClassicWhatNeedsMe() {
     // wait for the feed to load rather than for items to exist.
     if (!feed) return;
     const target = findDeepLinkTarget(allItems, deepLinkItemId, deepLinkDecisionId);
-    setDeepLinkConsumed(true);
+    const resolution = resolveDeepLink({
+      hasFeed: true,
+      target,
+      isFetching: feedQuery.isFetching,
+      dataUpdatedAt: feedQuery.dataUpdatedAt,
+      linkedAt: deepLinkSeen.current.at,
+      routeCompanyPrefix,
+      selectedCompanyPrefix: selectedCompany?.issuePrefix,
+    });
+    if (resolution === "wait") {
+      // Fresh cached data never refetches on its own; ask once so a brand-new
+      // item can show up before we call it missing.
+      const companyMatches =
+        !routeCompanyPrefix ||
+        routeCompanyPrefix.toUpperCase() === (selectedCompany?.issuePrefix ?? "").toUpperCase();
+      if (companyMatches && !feedQuery.isFetching && !deepLinkSeen.current.refetched) {
+        deepLinkSeen.current.refetched = true;
+        void feedQuery.refetch();
+      }
+      return;
+    }
+    setConsumedDeepLinkKey(deepLinkKey);
     setAutoExpandDone(true);
     if (target) {
       setExpandedId(target.id);
@@ -408,7 +467,7 @@ function ClassicWhatNeedsMe() {
         { replace: true },
       );
     }
-  }, [allItems, feed, deepLinkConsumed, deepLinkDecisionId, deepLinkItemId, pushToast, setSearchParams]);
+  }, [allItems, feed, feedQuery, deepLinkConsumed, deepLinkKey, deepLinkDecisionId, deepLinkItemId, routeCompanyPrefix, selectedCompany?.issuePrefix, pushToast, setSearchParams]);
 
   // Auto-expand the topmost inline-capable decision, once.
   useEffect(() => {

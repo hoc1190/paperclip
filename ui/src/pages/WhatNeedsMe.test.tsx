@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { AttentionItem } from "@paperclipai/shared";
-import { DecisionBundleHeader, decisionHistoryCount, decisionHistoryQueryEnabled, findDeepLinkTarget } from "./WhatNeedsMe";
+import { DecisionBundleHeader, decisionHistoryCount, decisionHistoryQueryEnabled, findDeepLinkTarget, resolveDeepLink } from "./WhatNeedsMe";
 
 describe("WhatNeedsMe decision history", () => {
   it("defers terminal-history queries until their curtain opens", () => {
@@ -49,5 +49,38 @@ describe("WhatNeedsMe deep link target", () => {
   it("keeps ?decisionId= matching decision subjects", () => {
     expect(findDeepLinkTarget(items, null, "d1")?.id).toBe("attn:b");
     expect(findDeepLinkTarget(items, null, "s1")).toBeUndefined();
+  });
+});
+
+describe("WhatNeedsMe resolveDeepLink", () => {
+  const base = {
+    hasFeed: true,
+    target: undefined,
+    isFetching: false,
+    dataUpdatedAt: 2000,
+    linkedAt: 1000,
+    routeCompanyPrefix: "PAP",
+    selectedCompanyPrefix: "PAP",
+  };
+  const hit = { id: "attn:a" } as AttentionItem;
+
+  it("opens a hit from cached data while a refetch is in flight", () => {
+    expect(resolveDeepLink({ ...base, target: hit, isFetching: true, dataUpdatedAt: 500 })).toBe("open");
+  });
+
+  it("waits on a miss while fetching or when data predates the link", () => {
+    expect(resolveDeepLink({ ...base, isFetching: true })).toBe("wait");
+    expect(resolveDeepLink({ ...base, dataUpdatedAt: 500 })).toBe("wait");
+    expect(resolveDeepLink({ ...base, hasFeed: false })).toBe("wait");
+  });
+
+  it("reports missing only after a fresh completed fetch", () => {
+    expect(resolveDeepLink(base)).toBe("missing");
+  });
+
+  it("waits while the selected company is not the route company", () => {
+    expect(resolveDeepLink({ ...base, selectedCompanyPrefix: "OLD" })).toBe("wait");
+    expect(resolveDeepLink({ ...base, target: hit, selectedCompanyPrefix: "OLD" })).toBe("wait");
+    expect(resolveDeepLink({ ...base, routeCompanyPrefix: "pap" })).toBe("missing");
   });
 });
