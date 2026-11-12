@@ -8,7 +8,8 @@ type WebPushEnv = Record<string, string | undefined>;
 export const DEFAULT_WEB_PUSH_SUBJECT = "https://paperclip.vibehonban.jp";
 const MAX_DERIVE_ATTEMPTS = 8;
 
-const cache = new WeakMap<object, WebPushVapid | null>();
+const NULL_RETRY_MS = 30_000;
+const cache = new WeakMap<object, { value: WebPushVapid | null; retryAt: number }>();
 
 export function webPushKeyId(publicKey: string): string {
   return createHash("sha256").update(publicKey).digest("hex").slice(0, 16);
@@ -17,7 +18,7 @@ export function webPushKeyId(publicKey: string): string {
 function deriveKeyPair(env: WebPushEnv): { publicKey: string; privateKey: string } {
   for (let attempt = 0; attempt < MAX_DERIVE_ATTEMPTS; attempt += 1) {
     const purpose = attempt === 0 ? "web-push-vapid:v1" : `web-push-vapid:v1:${attempt}`;
-    const privateKey = deriveLocalEncryptedInstanceSecret(purpose, env);
+    const privateKey = deriveLocalEncryptedInstanceSecret(purpose, env, { allowCreate: false });
     const ecdh = createECDH("prime256v1");
     try {
       ecdh.setPrivateKey(Buffer.from(privateKey, "base64url"));
@@ -49,10 +50,14 @@ function resolveUncached(env: WebPushEnv): WebPushVapid | null {
   }
 }
 
-/** Resolved once per env object (process lifetime for `process.env`). Null means push is disabled. */
+/**
+ * A key is resolved once per env object (process lifetime for `process.env`). Null means push is disabled;
+ * it is re-resolved after a short interval so a master key that appears later is picked up.
+ */
 export function resolveWebPushVapid(env: WebPushEnv = process.env): WebPushVapid | null {
-  if (cache.has(env)) return cache.get(env) ?? null;
-  const result = resolveUncached(env);
-  cache.set(env, result);
-  return result;
+  const cached = cache.get(env);
+  if (cached && (cached.value || Date.now() < cached.retryAt)) return cached.value;
+  const value = resolveUncached(env);
+  cache.set(env, { value, retryAt: Date.now() + NULL_RETRY_MS });
+  return value;
 }

@@ -866,7 +866,7 @@ export async function createApp(
   // index.ts wires the notifier (it needs the delivery coordinator) and fills webPushReconcile.
   const webPushSubscriptions = webPushSubscriptionService(db);
   app.locals.webPushSubscriptions = webPushSubscriptions;
-  api.use(webPushRoutes(db, { subscriptions: webPushSubscriptions, reconcile: () => app.locals.webPushReconcile }));
+  api.use(webPushRoutes(db, { subscriptions: webPushSubscriptions, reconcile: () => app.locals.webPushReconcile, isWarmStandby }));
   api.use(announcementRoutes(db, { ...opts.announcements, version: opts.hostVersion ?? serverVersion }));
   api.use(resourceMembershipRoutes(db));
   api.use(primaryAgentRoutes(db));

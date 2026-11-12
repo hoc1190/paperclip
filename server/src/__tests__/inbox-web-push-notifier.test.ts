@@ -12,7 +12,7 @@ import { webPushSubscriptionService } from "../services/web-push-subscriptions.j
 const support = await getEmbeddedPostgresTestSupport();
 const describeDatabase = support.supported ? describe : describe.skip;
 
-const keys = { p256dh: "p".repeat(87), auth: "a".repeat(22) };
+const keys = { p256dh: "B".repeat(87), auth: "a".repeat(22) };
 const vapid = { publicKey: "pub", privateKey: "priv", keyId: "key-1", subject: "https://paperclip.test" };
 
 describe("web push payload sizing", () => {
@@ -176,7 +176,10 @@ describeDatabase("inbox web push notifier", () => {
     expect(pushes).toHaveLength(6);
     // Oldest activityAt first: n7 is the oldest.
     expect(pushes.slice(0, 5).map(p => p.payload.itemId)).toEqual(["decision:n7", "decision:n6", "decision:n5", "decision:n4", "decision:n3"]);
-    expect(pushes[5]!.payload).toMatchObject({ title: "+3 mục mới trong Inbox", url: `/${prefix}/decisions`, companyId });
+    expect(pushes[5]!.payload).toMatchObject({ title: "+3 mục mới trong Inbox", url: `/${prefix}/decisions`, companyId, renotify: true });
+    expect(pushes[5]!.payload.tag.startsWith("inbox-summary:")).toBe(true);
+    expect(pushes[0]!.payload.renotify).toBeUndefined();
+    expect(Buffer.byteLength(JSON.stringify(pushes[5]!.payload))).toBeLessThanOrEqual(3000);
     expect((await notices()).length).toBe(1 + 8);
     emit(); await flush();
     expect(pushes).toHaveLength(6);
@@ -291,5 +294,61 @@ describeDatabase("inbox web push notifier", () => {
     listFails = false;
     emit(); await flush();
     expect(pushes).toHaveLength(1);
+  });
+
+  it("retries a failed company flush after about five seconds without a new event, with bounded attempts", async () => {
+    await subscribe(1);
+    const notifier = await make();
+    await notifier.requestReconcile({ userId: "local-board" });
+    await flush();
+    pending = [item("a")];
+    listFails = true;
+    emit(); await flush();
+    expect(pushes).toHaveLength(0);
+    const at = task().nextRunAt!();
+    expect(at).toBe(clock + 5000);
+    listFails = false;
+    clock = at!;
+    await task().run(new AbortController().signal);
+    expect(pushes).toHaveLength(1);
+
+    // Bounded: a permanently failing feed stops rescheduling after the retry budget.
+    pending = [item("b")];
+    listFails = true;
+    emit(); await flush();
+    for (let n = 0; n < 5; n += 1) {
+      expect(task().nextRunAt!()).not.toBeNull();
+      clock = task().nextRunAt!();
+      await task().run(new AbortController().signal);
+    }
+    expect(task().nextRunAt!()).toBeNull();
+  });
+
+  it("re-baselines when the last subscription is removed, so items from while disabled are not pushed on re-enable", async () => {
+    await subscribe(1);
+    pending = [item("old")];
+    const notifier = await make();
+    await notifier.requestReconcile({ userId: "local-board" });
+    await flush();
+    expect((await notices()).length).toBe(2);
+
+    expect(await subs.remove("local-board", "https://fcm.googleapis.com/fcm/send/1")).toBe(true);
+    expect(await notices()).toHaveLength(0);
+
+    pending = [item("old"), item("while-disabled")];
+    await subscribe(2);
+    await notifier.requestReconcile({ userId: "local-board" });
+    await flush();
+    expect(pushes).toHaveLength(0);
+    expect((await notices()).map(n => n.itemKey).sort()).toEqual(["__baseline__", "decision:old", "decision:while-disabled"]);
+  });
+
+  it("keeps the notices while the user still has another device", async () => {
+    await subscribe(1); await subscribe(2);
+    const notifier = await make();
+    await notifier.requestReconcile({ userId: "local-board" });
+    await flush();
+    await subs.remove("local-board", "https://fcm.googleapis.com/fcm/send/1");
+    expect((await notices()).map(n => n.itemKey)).toEqual(["__baseline__"]);
   });
 });

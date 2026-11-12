@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveWebPushVapid, DEFAULT_WEB_PUSH_SUBJECT, webPushKeyId } from "../services/web-push-vapid.js";
 
 const masterKey = (byte: number) => Buffer.alloc(32, byte).toString("base64");
@@ -37,5 +40,26 @@ describe("web push VAPID resolution", () => {
   it("is disabled for a subject Apple would reject, and when the master key cannot be loaded", () => {
     expect(resolveWebPushVapid({ PAPERCLIP_SECRETS_MASTER_KEY: masterKey(7), PAPERCLIP_WEB_PUSH_SUBJECT: "http://insecure.example" })).toBeNull();
     expect(resolveWebPushVapid({ PAPERCLIP_SECRETS_MASTER_KEY: "not-a-valid-key" })).toBeNull();
+  });
+
+  describe("without a master key", () => {
+    afterEach(() => vi.useRealTimers());
+    const missingKeyEnv = () => ({ PAPERCLIP_SECRETS_MASTER_KEY_FILE: path.join(mkdtempSync(path.join(tmpdir(), "vapid-")), "master.key") });
+
+    it("never creates a master key file and is disabled", () => {
+      const env = missingKeyEnv();
+      expect(resolveWebPushVapid(env)).toBeNull();
+      expect(existsSync(env.PAPERCLIP_SECRETS_MASTER_KEY_FILE)).toBe(false);
+    });
+
+    it("does not cache the missing key forever", () => {
+      vi.useFakeTimers();
+      const env = missingKeyEnv();
+      expect(resolveWebPushVapid(env)).toBeNull();
+      writeFileSync(env.PAPERCLIP_SECRETS_MASTER_KEY_FILE, masterKey(9), { mode: 0o600 });
+      expect(resolveWebPushVapid(env)).toBeNull(); // still inside the retry interval
+      vi.advanceTimersByTime(31_000);
+      expect(resolveWebPushVapid(env)).not.toBeNull();
+    });
   });
 });
